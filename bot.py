@@ -373,28 +373,33 @@ def handle_contact(m: types.Message):
             bot.send_message(m.chat.id, "❌ لطفاً شماره تلفن خودتان را ارسال کنید.")
             return
         
+        # اگر کاربر مالک است، مستقیم فعال کن (بدون کد)
+        if is_owner(user_id):
+            success, msg = activate_self(user_id)
+            if success:
+                bot.send_message(m.chat.id, f"✅ {msg}\nشما مالک هستید و سلف شما فعال شد!")
+            else:
+                bot.send_message(m.chat.id, f"❌ {msg}")
+            return
+        
+        # برای کاربران عادی، کد ارسال کن
         bot.send_message(m.chat.id, f"✅ شماره شما دریافت شد!\nشماره: {phone_number}\n\n📤 در حال ارسال درخواست کد به تلگرام...")
         
-        # ارسال درخواست کد به یوزربات
         async def send_code_request():
             try:
-                # درخواست کد از تلگرام
                 sent_code = await userbot.send_code(phone_number)
                 
-                # ذخیره اطلاعات برای کاربر
                 temp_data[user_id] = {
                     'phone': phone_number,
                     'phone_code_hash': sent_code.phone_code_hash,
                     'time': time.time()
                 }
                 
-                # حذف کیبورد شماره
                 markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
                 markup.row("≼ سـلـفـ 𝐕𝐢𝐏 ≽", "≼ خـدمـاتـ 𝐕𝐢𝐏 ≽")
                 markup.row("≼ شـارژ مـوجـودی 💳 ≽", "≼ الماس رایگان ≽")
                 markup.row("≼ پروفایل ≽")
                 
-                # پیام به کاربر
                 bot.send_message(
                     user_id,
                     f"✅ کد تایید به تلگرام شما ارسال شد.\n📝 لطفاً کد ۵ رقمی را که از تلگرام دریافت کردید، وارد کنید:",
@@ -402,7 +407,14 @@ def handle_contact(m: types.Message):
                 )
                 
             except Exception as e:
-                bot.send_message(user_id, f"❌ خطا در ارسال کد: {str(e)}")
+                error_msg = str(e)
+                if "FLOOD_WAIT" in error_msg:
+                    wait_time = error_msg.split("FLOOD_WAIT_")[1].split("_")[0] if "_" in error_msg else "چند"
+                    bot.send_message(user_id, f"❌ تلگرام محدودیت ایجاد کرده. لطفاً {wait_time} ثانیه صبر کنید و دوباره تلاش کنید.")
+                elif "PHONE_NUMBER_BANNED" in error_msg:
+                    bot.send_message(user_id, f"❌ این شماره توسط تلگرام مسدود شده است.")
+                else:
+                    bot.send_message(user_id, f"❌ خطا در ارسال کد: {error_msg}")
         
         asyncio.run_coroutine_threadsafe(send_code_request(), userbot.loop)
 
