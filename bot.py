@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-VIP Bot v18 - نسخه ویرایش‌شده با پنل مدیریت و الماس بینهایت برای مالک
+VIP Bot v19 - نسخه ترکیبی ربات + یوزربات
 """
 import sqlite3
 import threading
@@ -8,9 +8,14 @@ import html
 import logging
 import time
 import random
+import asyncio
+import os
+from datetime import datetime
 
 import telebot
 from telebot import types
+from pyrogram import Client
+from pyrogram.types import Message as PyroMessage
 
 # ----------------- CONFIG -----------------
 BOT_TOKEN = "8200221816:AAFVgwZ2reZzm3tDM_k0bEWHSkCTlWacxlY"
@@ -18,17 +23,35 @@ OWNER_ID = 5552127428
 DEVELOPER_ID = 5552127428
 ADMIN_IDS = [OWNER_ID, DEVELOPER_ID]
 
-DB_PATH = "vip_bet.db"
+# اطلاعات یوزربات
+API_ID = 37386944
+API_HASH = "d64069023db75d11ae5982f653069a98"
+SESSION_NAME = "userbot_session"
+
+# مسیر دیتابیس
+DATA_DIR = os.path.join(os.getcwd(), "data")
+if not os.path.exists(DATA_DIR):
+    os.makedirs(DATA_DIR)
+DB_PATH = os.path.join(DATA_DIR, "vip_bet.db")
+
 DIAMOND_RATE = 40
 REF_BONUS = 40
 BOT_USERNAME = "self_made_iran_bot"
+ACTIVATE_COST = 20
+HOURLY_COST = 2
 
 bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML")
 logging.basicConfig(level=logging.INFO)
-# اگر لازم باشد RLock برای برخی عملیات پیچیده‌تر را می‌توان فعال کرد
 db_lock = threading.RLock()
 
-# ----------------- DATABASE -----------------
+# ----------------- یوزربات -----------------
+userbot = Client(
+    SESSION_NAME,
+    api_id=API_ID,
+    api_hash=API_HASH
+)
+
+# ----------------- دیتابیس -----------------
 def init_db():
     with sqlite3.connect(DB_PATH) as conn:
         conn.executescript("""
@@ -36,7 +59,9 @@ def init_db():
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
             diamonds INTEGER DEFAULT 0,
-            created_at INTEGER
+            created_at INTEGER,
+            is_self_active INTEGER DEFAULT 0,
+            self_active_time INTEGER DEFAULT 0
         );
         CREATE TABLE IF NOT EXISTS settings (
             key TEXT PRIMARY KEY,
@@ -60,18 +85,48 @@ def init_db():
             message_id INTEGER,
             created_at INTEGER
         );
+        CREATE TABLE IF NOT EXISTS self_settings (
+            user_id INTEGER PRIMARY KEY,
+            text_mode TEXT DEFAULT 'normal',
+            is_clock_on INTEGER DEFAULT 0,
+            font_style TEXT DEFAULT 'font1',
+            action_mode TEXT DEFAULT 'none',
+            is_auto_reply_on INTEGER DEFAULT 0,
+            auto_reply_text TEXT DEFAULT ''
+        );
         """)
         conn.commit()
 
-# ----------------- DB HELPERS -----------------
-INFINITE_OWNER_REPR = 10**18  # نمایشی از بینهایت برای مالک
+# ----------------- توابع کمکی -----------------
+INFINITE_OWNER_REPR = 10**18
+
+def to_superscript(num: str) -> str:
+    """تبدیل اعداد به بالانویس (فونت ۲)"""
+    superscript_map = {
+        '0': '⁰', '1': '¹', '2': '²', '3': '³', '4': '⁴',
+        '5': '⁵', '6': '⁶', '7': '⁷', '8': '⁸', '9': '⁹'
+    }
+    return ''.join(superscript_map.get(c, c) for c in str(num))
+
+def get_clock_display(user_id: int) -> str:
+    """دریافت ساعت با فرمت مناسب بر اساس فونت کاربر"""
+    settings = get_self_settings(user_id)
+    current_time = datetime.now().strftime("%H:%M")
+    
+    if settings['font_style'] == 'font2':
+        return to_superscript(current_time)
+    else:
+        return current_time
 
 def ensure_user(uid: int):
     with db_lock:
         with sqlite3.connect(DB_PATH) as conn:
             cur = conn.cursor()
-            cur.execute("INSERT OR IGNORE INTO users(user_id,diamonds,created_at) VALUES(?,?,?)", (uid, 0, int(time.time())))
+            cur.execute("INSERT OR IGNORE INTO users(user_id,diamonds,created_at,is_self_active,self_active_time) VALUES(?,?,?,?,?)", 
+                       (uid, 0, int(time.time()), 0, 0))
             cur.execute("INSERT OR IGNORE INTO referrals(user_id,count) VALUES(?,0)", (uid,))
+            cur.execute("INSERT OR IGNORE INTO self_settings(user_id,text_mode,is_clock_on,font_style,action_mode,is_auto_reply_on,auto_reply_text) VALUES(?,?,?,?,?,?,?)",
+                       (uid, 'normal', 0, 'font1', 'none', 0, ''))
             conn.commit()
 
 def is_owner(uid: int) -> bool:
@@ -81,7 +136,6 @@ def is_admin(uid: int) -> bool:
     return uid in ADMIN_IDS
 
 def get_balance(uid: int) -> int:
-    # مالک بینهایت است (نمایش و رفتار بینهایت)
     if is_owner(uid):
         return INFINITE_OWNER_REPR
     ensure_user(uid)
@@ -93,7 +147,6 @@ def get_balance(uid: int) -> int:
 
 def set_balance(uid: int, amount: int):
     if is_owner(uid):
-        # روی مالک کاری انجام نمی‌دهیم؛ مالک بینهایت است
         return
     ensure_user(uid)
     with db_lock:
@@ -103,15 +156,82 @@ def set_balance(uid: int, amount: int):
             conn.commit()
 
 def change_balance(uid: int, delta: int):
-    # هیچگاه از مالک کم نکنیم — مالک بینهایت است
     if is_owner(uid):
-        # اگر خواستید می‌توانید لاگ ذخیره کنید؛ در این نسخه صرفاً نادیده می‌گیریم.
         return
     ensure_user(uid)
     with db_lock:
         with sqlite3.connect(DB_PATH) as conn:
             cur = conn.cursor()
             cur.execute("UPDATE users SET diamonds = diamonds + ? WHERE user_id=?", (delta, uid))
+            conn.commit()
+
+def is_self_active(uid: int) -> bool:
+    ensure_user(uid)
+    with sqlite3.connect(DB_PATH) as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT is_self_active, self_active_time FROM users WHERE user_id=?", (uid,))
+        r = cur.fetchone()
+        if not r or r[0] == 0:
+            return False
+        current_time = int(time.time())
+        hours_passed = (current_time - r[1]) // 3600
+        if hours_passed > 0:
+            cost = hours_passed * HOURLY_COST
+            bal = get_balance(uid)
+            if bal >= cost:
+                change_balance(uid, -cost)
+                with db_lock:
+                    with sqlite3.connect(DB_PATH) as conn:
+                        cur2 = conn.cursor()
+                        cur2.execute("UPDATE users SET self_active_time=? WHERE user_id=?", (current_time, uid))
+                        conn.commit()
+                return True
+            else:
+                with db_lock:
+                    with sqlite3.connect(DB_PATH) as conn:
+                        cur2 = conn.cursor()
+                        cur2.execute("UPDATE users SET is_self_active=0, self_active_time=0 WHERE user_id=?", (uid,))
+                        conn.commit()
+                return False
+        return True
+
+def activate_self(uid: int):
+    ensure_user(uid)
+    bal = get_balance(uid)
+    if bal < ACTIVATE_COST:
+        return False, "موجودی کافی نیست"
+    change_balance(uid, -ACTIVATE_COST)
+    with db_lock:
+        with sqlite3.connect(DB_PATH) as conn:
+            cur = conn.cursor()
+            cur.execute("UPDATE users SET is_self_active=1, self_active_time=? WHERE user_id=?", (int(time.time()), uid))
+            conn.commit()
+    return True, "سلف شما فعال شد"
+
+def deactivate_self(uid: int):
+    ensure_user(uid)
+    with db_lock:
+        with sqlite3.connect(DB_PATH) as conn:
+            cur = conn.cursor()
+            cur.execute("UPDATE users SET is_self_active=0, self_active_time=0 WHERE user_id=?", (uid,))
+            conn.commit()
+
+def get_self_settings(uid: int):
+    ensure_user(uid)
+    with sqlite3.connect(DB_PATH) as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT text_mode, is_clock_on, font_style, action_mode, is_auto_reply_on, auto_reply_text FROM self_settings WHERE user_id=?", (uid,))
+        r = cur.fetchone()
+        if not r:
+            return {'text_mode': 'normal', 'is_clock_on': 0, 'font_style': 'font1', 'action_mode': 'none', 'is_auto_reply_on': 0, 'auto_reply_text': ''}
+        return {'text_mode': r[0], 'is_clock_on': r[1], 'font_style': r[2], 'action_mode': r[3], 'is_auto_reply_on': r[4], 'auto_reply_text': r[5]}
+
+def set_self_settings(uid: int, key: str, value):
+    ensure_user(uid)
+    with db_lock:
+        with sqlite3.connect(DB_PATH) as conn:
+            cur = conn.cursor()
+            cur.execute(f"UPDATE self_settings SET {key}=? WHERE user_id=?", (value, uid))
             conn.commit()
 
 def set_setting(key: str, value: str):
@@ -153,16 +273,6 @@ def has_used_ref(user_id: int):
         r = cur.fetchone()
         return int(r[0]) if r else None
 
-# ----------------- TEXT TEMPLATES -----------------
-BALANCE_TEXT = "💎 موجودی شما:\nالماس 💎: {diamonds}\nبه تومان: {toman:,}"
-FREE_DIAMOND_TEXT = (
-    "💎 با دعوت دوستان خود\n"
-    "50 الماس دریافت کنید! فقط تا امروز..\n"
-    "👥 کل دعوتی‌ها: {count}\n"
-    "🔗 لینک دعوت: {link}"
-)
-
-# ----------------- HELPERS -----------------
 def user_display_from_userobj(u):
     if not u:
         return "کاربر"
@@ -176,7 +286,6 @@ def user_display_from_id(uid: int):
         u = bot.get_chat(uid)
         return user_display_from_userobj(u)
     except Exception:
-        # اگر گرفتن اطلاعات کاربر شکست خورد، آیدی را نشان می‌دهیم
         if is_owner(uid):
             return "مالک (∞)"
         return f"<a href='tg://user?id={uid}'>کاربر</a>"
@@ -184,7 +293,7 @@ def user_display_from_id(uid: int):
 def in_private(m): return m.chat.type == "private"
 def in_group(m): return m.chat.type in ("group","supergroup")
 
-# ----------------- START & REFERRAL -----------------
+# ----------------- START -----------------
 @bot.message_handler(commands=['start'])
 def cmd_start(m: types.Message):
     args = m.text.split()
@@ -216,6 +325,7 @@ def cmd_start(m: types.Message):
         markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
         markup.row("≼ سـلـفـ 𝐕𝐢𝐏 ≽", "≼ خـدمـاتـ 𝐕𝐢𝐏 ≽")
         markup.row("≼ شـارژ مـوجـودی 💳 ≽", "≼ الماس رایگان ≽")
+        markup.row("≼ پروفایل ≽")
         if photo_id:
             try:
                 bot.send_photo(m.chat.id, photo_id, caption=text, reply_markup=markup)
@@ -224,49 +334,311 @@ def cmd_start(m: types.Message):
         else:
             bot.send_message(m.chat.id, text, reply_markup=markup)
 
-# ----------------- ADMIN GIVE / REMOVE -----------------
-@bot.message_handler(commands=['give'])
-def cmd_give(m: types.Message):
-    if not is_admin(m.from_user.id):
-        return bot.reply_to(m, "اجازه ندارید.")
-    try:
-        if m.reply_to_message:
-            target = m.reply_to_message.from_user.id
-            amount = int(m.text.split()[1])
-        else:
-            parts = m.text.split()
-            target = int(parts[1])
-            amount = int(parts[2])
-    except:
-        return bot.reply_to(m, "فرمت: ریپلای + /give <amount> یا /give <user_id> <amount>")
-    # اگر فرستنده مالک است و به خاطر بینهایت بودن مالک، کسی خواست از مالک کم شود
-    # این دستور فقط الماس را به کاربر اضافه می‌کند
-    change_balance(target, amount)
-    bot.reply_to(m, f"✅ {amount} الماس به کاربر {target} اضافه شد.")
+# ----------------- SELF ACTIVATION -----------------
+@bot.message_handler(func=lambda m: in_private(m) and m.text and m.text.strip() == "≼ سـلـفـ 𝐕𝐢𝐏 ≽")
+def cmd_self(m: types.Message):
+    user_id = m.from_user.id
+    ensure_user(user_id)
+    
+    if is_self_active(user_id):
+        text = "✅ سلف شما فعال است!\nبرای غیر فعال کردن روی دکمه زیر کلیک کنید."
+        markup = types.InlineKeyboardMarkup()
+        markup.add(types.InlineKeyboardButton("❌ غیرفعال کردن سلف", callback_data="self:deactivate"))
+        bot.send_message(m.chat.id, text, reply_markup=markup)
+    else:
+        text = f"🔐 برای فعال سازی سلف باید احراز هویت کنید.\nهزینه فعال‌سازی: {ACTIVATE_COST} الماس\nهر ساعت {HOURLY_COST} الماس از موجودی شما کم می‌شود."
+        markup = types.InlineKeyboardMarkup()
+        markup.add(types.InlineKeyboardButton("✅ احراز هویت", callback_data="self:activate"))
+        bot.send_message(m.chat.id, text, reply_markup=markup)
 
-@bot.message_handler(commands=['remove'])
-def cmd_remove(m: types.Message):
-    if not is_admin(m.from_user.id):
-        return bot.reply_to(m, "اجازه ندارید.")
+@bot.callback_query_handler(func=lambda c: c.data and c.data.startswith("self:"))
+def cb_self(c):
     try:
-        if m.reply_to_message:
-            target = m.reply_to_message.from_user.id
-            amount = int(m.text.split()[1])
-        else:
-            parts = m.text.split()
-            target = int(parts[1])
-            amount = int(parts[2])
+        bot.answer_callback_query(c.id)
     except:
-        return bot.reply_to(m, "فرمت: ریپلای + /remove <amount> یا /remove <user_id> <amount>")
-    if is_owner(target):
-        return bot.reply_to(m, "❌ روی مالک نمی‌توان موجودی را کم کرد (مالک بینهایت است).")
-    bal = get_balance(target)
-    if amount > bal:
-        amount = bal
-    change_balance(target, -amount)
-    bot.reply_to(m, f"✅ {amount} الماس از کاربر {target} کسر شد.")
+        pass
+    
+    user_id = c.from_user.id
+    ensure_user(user_id)
+    action = c.data.split(":")[1]
+    
+    if action == "activate":
+        success, msg = activate_self(user_id)
+        if success:
+            asyncio.run_coroutine_threadsafe(
+                userbot.send_message(user_id, "✅ سلف شما با موفقیت فعال شد!"),
+                userbot.loop
+            )
+            bot.send_message(c.message.chat.id, f"✅ {msg}\nشما می‌توانید از پنل خدمات استفاده کنید.", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).row("≼ خـدمـاتـ 𝐕𝐢𝐏 ≽"))
+        else:
+            bot.send_message(c.message.chat.id, f"❌ {msg}\nموجودی فعلی: {get_balance(user_id)} الماس")
+    
+    elif action == "deactivate":
+        deactivate_self(user_id)
+        bot.send_message(c.message.chat.id, "❌ سلف شما غیرفعال شد.")
 
-# ----------------- TRANSFER DIAMONDS (GROUP ONLY) -----------------
+# ----------------- SERVICES PANEL -----------------
+@bot.message_handler(func=lambda m: in_private(m) and m.text and m.text.strip() == "≼ خـدمـاتـ 𝐕𝐢𝐏 ≽")
+def cmd_services(m: types.Message):
+    user_id = m.from_user.id
+    ensure_user(user_id)
+    
+    if not is_self_active(user_id):
+        text = "❌ برای استفاده از خدمات VIP ابتدا سلف خود را فعال کنید.\nاز دکمه ≼ سـلـفـ 𝐕𝐢𝐏 ≽ استفاده کنید."
+        bot.send_message(m.chat.id, text)
+        return
+    
+    text = "🎯 پنل خدمات VIP\n\nاز دکمه‌های زیر برای تنظیمات استفاده کنید:"
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        types.InlineKeyboardButton("📝 حالت متن", callback_data="service:text_mode"),
+        types.InlineKeyboardButton("⏰ ساعت", callback_data="service:clock"),
+        types.InlineKeyboardButton("🔤 فونت", callback_data="service:font"),
+        types.InlineKeyboardButton("🎬 اکشن", callback_data="service:action"),
+        types.InlineKeyboardButton("🤖 منشی پی‌وی", callback_data="service:auto_reply"),
+        types.InlineKeyboardButton("📊 وضعیت سلف", callback_data="service:status")
+    )
+    markup.add(types.InlineKeyboardButton("❌ بستن پنل", callback_data="service:close"))
+    bot.send_message(m.chat.id, text, reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda c: c.data and c.data.startswith("service:"))
+def cb_service(c):
+    try:
+        bot.answer_callback_query(c.id)
+    except:
+        pass
+    
+    user_id = c.from_user.id
+    ensure_user(user_id)
+    action = c.data.split(":")[1]
+    
+    if action == "close":
+        try:
+            bot.delete_message(c.message.chat.id, c.message.message_id)
+        except:
+            bot.send_message(c.message.chat.id, "پنل بسته شد.")
+        return
+    
+    if action == "status":
+        if is_self_active(user_id):
+            text = "✅ سلف شما فعال است"
+            settings = get_self_settings(user_id)
+            text += f"\n📝 حالت متن: {settings['text_mode']}"
+            text += f"\n⏰ ساعت: {'روشن' if settings['is_clock_on'] else 'خاموش'}"
+            text += f"\n🔤 فونت: {settings['font_style']}"
+            text += f"\n🎬 اکشن: {settings['action_mode']}"
+            text += f"\n🤖 منشی پی‌وی: {'روشن' if settings['is_auto_reply_on'] else 'خاموش'}"
+        else:
+            text = "❌ سلف شما فعال نیست"
+        bot.send_message(c.message.chat.id, text)
+        return
+    
+    if action == "text_mode":
+        settings = get_self_settings(user_id)
+        current = settings['text_mode']
+        markup = types.InlineKeyboardMarkup(row_width=2)
+        markup.add(
+            types.InlineKeyboardButton(f"{'✅ ' if current == 'normal' else ''}عادی", callback_data="text:set:normal"),
+            types.InlineKeyboardButton(f"{'✅ ' if current == 'bold' else ''}پررنگ", callback_data="text:set:bold"),
+            types.InlineKeyboardButton(f"{'✅ ' if current == 'quote' else ''}نقل قول", callback_data="text:set:quote"),
+            types.InlineKeyboardButton(f"{'✅ ' if current == 'spoiler' else ''}اسپویلر", callback_data="text:set:spoiler")
+        )
+        markup.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data="service:text_back"))
+        bot.edit_message_text("📝 انتخاب حالت متن:", c.message.chat.id, c.message.message_id, reply_markup=markup)
+        return
+    
+    if action == "clock":
+        settings = get_self_settings(user_id)
+        is_on = settings['is_clock_on']
+        current_time = get_clock_display(user_id)
+        markup = types.InlineKeyboardMarkup(row_width=1)
+        markup.add(
+            types.InlineKeyboardButton(f"{'🟢 روشن' if is_on else '🔴 خاموش'}", callback_data=f"clock:toggle:{1 if not is_on else 0}"),
+            types.InlineKeyboardButton("🔙 بازگشت", callback_data="service:clock_back")
+        )
+        bot.edit_message_text(f"⏰ تنظیمات ساعت:\nوضعیت: {'روشن' if is_on else 'خاموش'}\nنمایش فعلی: {current_time}", c.message.chat.id, c.message.message_id, reply_markup=markup)
+        return
+    
+    if action == "font":
+        settings = get_self_settings(user_id)
+        current = settings['font_style']
+        markup = types.InlineKeyboardMarkup(row_width=2)
+        markup.add(
+            types.InlineKeyboardButton(f"{'✅ ' if current == 'font1' else ''}فونت ۱ (۰۱۲۳)", callback_data="font:set:font1"),
+            types.InlineKeyboardButton(f"{'✅ ' if current == 'font2' else ''}فونت ۲ (⁰¹²³)", callback_data="font:set:font2")
+        )
+        markup.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data="service:font_back"))
+        bot.edit_message_text("🔤 انتخاب فونت:", c.message.chat.id, c.message.message_id, reply_markup=markup)
+        return
+    
+    if action == "action":
+        settings = get_self_settings(user_id)
+        current = settings['action_mode']
+        markup = types.InlineKeyboardMarkup(row_width=2)
+        markup.add(
+            types.InlineKeyboardButton(f"{'✅ ' if current == 'none' else ''}خاموش", callback_data="action:set:none"),
+            types.InlineKeyboardButton(f"{'✅ ' if current == 'voice' else ''}ویس", callback_data="action:set:voice"),
+            types.InlineKeyboardButton(f"{'✅ ' if current == 'game' else ''}بازی", callback_data="action:set:game"),
+            types.InlineKeyboardButton(f"{'✅ ' if current == 'sticker' else ''}استیکر", callback_data="action:set:sticker")
+        )
+        markup.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data="service:action_back"))
+        bot.edit_message_text("🎬 انتخاب اکشن:", c.message.chat.id, c.message.message_id, reply_markup=markup)
+        return
+    
+    if action == "auto_reply":
+        settings = get_self_settings(user_id)
+        is_on = settings['is_auto_reply_on']
+        current_text = settings['auto_reply_text'] or "⚡️سلام وقت بخیر دوست گرامی ⭐️\n\n🧖‍♂بنده آفلاین هستم آنلاین شدم زود جوابتو میدم 😶‍🌫"
+        markup = types.InlineKeyboardMarkup(row_width=1)
+        markup.add(
+            types.InlineKeyboardButton(f"{'🟢 روشن' if is_on else '🔴 خاموش'}", callback_data=f"reply:toggle:{1 if not is_on else 0}"),
+            types.InlineKeyboardButton("📝 تغییر متن", callback_data="reply:change_text"),
+            types.InlineKeyboardButton("🔙 بازگشت", callback_data="service:reply_back")
+        )
+        bot.edit_message_text(f"🤖 منشی پی‌وی:\nوضعیت: {'روشن' if is_on else 'خاموش'}\n\nمتن فعلی:\n{current_text}", c.message.chat.id, c.message.message_id, reply_markup=markup)
+        return
+    
+    if action in ["text_back", "clock_back", "font_back", "action_back", "reply_back"]:
+        cmd_services(c.message)
+
+# ----------------- TEXT MODE -----------------
+@bot.callback_query_handler(func=lambda c: c.data and c.data.startswith("text:"))
+def cb_text(c):
+    try:
+        bot.answer_callback_query(c.id)
+    except:
+        pass
+    user_id = c.from_user.id
+    action = c.data.split(":")[1]
+    if action == "set":
+        mode = c.data.split(":")[2]
+        set_self_settings(user_id, "text_mode", mode)
+        asyncio.run_coroutine_threadsafe(
+            userbot.send_message(user_id, f"حالت متن به {mode} تغییر یافت"),
+            userbot.loop
+        )
+        bot.send_message(c.message.chat.id, f"✅ حالت متن به {mode} تغییر یافت.")
+        cmd_services(c.message)
+    elif action == "back":
+        cmd_services(c.message)
+
+# ----------------- CLOCK -----------------
+@bot.callback_query_handler(func=lambda c: c.data and c.data.startswith("clock:"))
+def cb_clock(c):
+    try:
+        bot.answer_callback_query(c.id)
+    except:
+        pass
+    user_id = c.from_user.id
+    action = c.data.split(":")[1]
+    if action == "toggle":
+        value = int(c.data.split(":")[2])
+        set_self_settings(user_id, "is_clock_on", value)
+        asyncio.run_coroutine_threadsafe(
+            userbot.send_message(user_id, f"ساعت {'روشن' if value else 'خاموش'} شد"),
+            userbot.loop
+        )
+        bot.send_message(c.message.chat.id, f"✅ ساعت {'روشن' if value else 'خاموش'} شد.")
+        cmd_services(c.message)
+    elif action == "back":
+        cmd_services(c.message)
+
+# ----------------- FONT -----------------
+@bot.callback_query_handler(func=lambda c: c.data and c.data.startswith("font:"))
+def cb_font(c):
+    try:
+        bot.answer_callback_query(c.id)
+    except:
+        pass
+    user_id = c.from_user.id
+    action = c.data.split(":")[1]
+    if action == "set":
+        font = c.data.split(":")[2]
+        set_self_settings(user_id, "font_style", font)
+        asyncio.run_coroutine_threadsafe(
+            userbot.send_message(user_id, f"فونت به {font} تغییر یافت"),
+            userbot.loop
+        )
+        bot.send_message(c.message.chat.id, f"✅ فونت به {font} تغییر یافت.")
+        cmd_services(c.message)
+    elif action == "back":
+        cmd_services(c.message)
+
+# ----------------- ACTION -----------------
+@bot.callback_query_handler(func=lambda c: c.data and c.data.startswith("action:"))
+def cb_action(c):
+    try:
+        bot.answer_callback_query(c.id)
+    except:
+        pass
+    user_id = c.from_user.id
+    action = c.data.split(":")[1]
+    if action == "set":
+        mode = c.data.split(":")[2]
+        set_self_settings(user_id, "action_mode", mode)
+        asyncio.run_coroutine_threadsafe(
+            userbot.send_message(user_id, f"اکشن به {mode} تغییر یافت"),
+            userbot.loop
+        )
+        bot.send_message(c.message.chat.id, f"✅ اکشن به {mode} تغییر یافت.")
+        cmd_services(c.message)
+    elif action == "back":
+        cmd_services(c.message)
+
+# ----------------- AUTO REPLY -----------------
+@bot.callback_query_handler(func=lambda c: c.data and c.data.startswith("reply:"))
+def cb_reply(c):
+    try:
+        bot.answer_callback_query(c.id)
+    except:
+        pass
+    user_id = c.from_user.id
+    action = c.data.split(":")[1]
+    if action == "toggle":
+        value = int(c.data.split(":")[2])
+        set_self_settings(user_id, "is_auto_reply_on", value)
+        asyncio.run_coroutine_threadsafe(
+            userbot.send_message(user_id, f"منشی پی‌وی {'روشن' if value else 'خاموش'} شد"),
+            userbot.loop
+        )
+        bot.send_message(c.message.chat.id, f"✅ منشی پی‌وی {'روشن' if value else 'خاموش'} شد.")
+        cmd_services(c.message)
+    elif action == "change_text":
+        bot.send_message(c.message.chat.id, "📝 متن جدید را به همراه ریپلای به این پیام ارسال کنید.\nبرای تغییر متن، روی این پیام ریپلای بزنید و متن جدید را بنویسید.")
+        with db_lock:
+            set_setting(f"reply_change_{user_id}", "waiting")
+    elif action == "back":
+        cmd_services(c.message)
+
+# ----------------- دریافت متن جدید منشی -----------------
+@bot.message_handler(func=lambda m: in_private(m) and m.reply_to_message)
+def handle_reply_text(m):
+    user_id = m.from_user.id
+    waiting = get_setting(f"reply_change_{user_id}")
+    if waiting == "waiting":
+        new_text = m.text
+        set_self_settings(user_id, "auto_reply_text", new_text)
+        set_setting(f"reply_change_{user_id}", "done")
+        bot.send_message(m.chat.id, "✅ متن منشی پی‌وی تغییر یافت.")
+        cmd_services(m)
+
+# ----------------- PROFILE -----------------
+@bot.message_handler(func=lambda m: in_private(m) and m.text and m.text.strip() == "≼ پروفایل ≽")
+def cmd_profile(m: types.Message):
+    user_id = m.from_user.id
+    ensure_user(user_id)
+    bal = get_balance(user_id)
+    is_active = is_self_active(user_id)
+    
+    text = f"👤 پروفایل شما:\n\n"
+    text += f"💎 الماس: {bal}\n"
+    text += f"💰 تومان: {bal * DIAMOND_RATE:,}\n"
+    text += f"🔐 وضعیت سلف: {'✅ فعال' if is_active else '❌ غیرفعال'}\n"
+    text += f"👥 تعداد دعوت‌ها: {get_ref_count(user_id)}"
+    
+    bot.send_message(m.chat.id, text)
+
+# ----------------- TRANSFER -----------------
 @bot.message_handler(func=lambda message: message.text and message.text.startswith("انتقال"))
 def transfer_diamonds(message):
     if message.chat.type not in ["group", "supergroup"]:
@@ -290,7 +662,6 @@ def transfer_diamonds(message):
         bot.reply_to(message, "❌ مقدار الماس باید عدد مثبت باشد.")
         return
 
-    # شناسایی گیرنده
     receiver_id = None
     if message.reply_to_message:
         receiver_id = message.reply_to_message.from_user.id
@@ -306,10 +677,8 @@ def transfer_diamonds(message):
         bot.reply_to(message, "❌ نمی‌توانید به خودتان الماس بفرستید.")
         return
 
-    # اگر فرستنده مالک باشد: اجازه انتقال بدون کسر موجودی و بدون مالیات (بینهایت)
     if is_owner(sender_id):
         tax = 0
-        # فقط دریافت‌کننده را شارژ می‌کنیم (مالک از موجودی کم نمی‌شود)
         change_balance(receiver_id, amount)
         sender_name = message.from_user.username or message.from_user.first_name or f"مالک"
         receipt = (
@@ -331,22 +700,19 @@ def transfer_diamonds(message):
             pass
         return
 
-    # محاسبه مالیات و بررسی موجودی فرستنده (برای کاربران معمولی)
     tax = int(amount * 0.05)
-    total_cost = amount + tax  # مبلغی که از فرستنده کم می‌شود
+    total_cost = amount + tax
 
     sender_balance = get_balance(sender_id)
     if sender_balance < total_cost:
         bot.reply_to(message, f"❌ موجودی کافی نیست.\nشما برای انتقال {amount} الماس، باید {total_cost} الماس داشته باشید (شامل مالیات ۵٪).")
         return
 
-    # انتقال الماس
     change_balance(sender_id, -total_cost)
     change_balance(receiver_id, amount)
 
     sender_name = message.from_user.username or message.from_user.first_name or f"کاربر {sender_id}"
 
-    # رسید
     receipt = (
         f"💎 رسید انتقال الماس\n"
         f"👤 فرستنده: <b>{sender_name}</b>\n"
@@ -357,7 +723,6 @@ def transfer_diamonds(message):
     )
     bot.reply_to(message, receipt, parse_mode="HTML")
 
-    # پیام اطلاع‌رسانی به گیرنده
     try:
         bot.send_message(
             receiver_id,
@@ -367,14 +732,10 @@ def transfer_diamonds(message):
     except:
         pass
 
-# ================== BET SECTION (FIXED: RLock + early answer) ==================
-
+# ================== BET SECTION ==================
 MIN_BET = 20
 BET_TAX_PERCENT = 2
-# DB_PATH already set
-# db_lock is RLock above
 
-# متن‌ها
 BET_OPEN_TEXT = (
     "◈ ━━━━ 𝐕𝐈𝐏 ━━━━━ ◈\n"
     "شرطبندی باز شد:\n"
@@ -415,10 +776,8 @@ def cmd_bet(m):
     if bal < amount:
         return bot.reply_to(m, "موجودی کافی ندارید.")
 
-    # کم کردن از کاربر (این تابع خودش از db_lock استفاده می‌کند)
     change_balance(user_id, -amount)
 
-    # ثبت شرط در دیتابیس — فقط هنگام نوشتن به DB قفل می‌گیریم
     with db_lock:
         with sqlite3.connect(DB_PATH) as conn:
             cur = conn.cursor()
@@ -432,20 +791,16 @@ def cmd_bet(m):
     text = BET_OPEN_TEXT.format(amount=amount, creator=user_display_from_id(user_id))
     kb = bet_keyboard(bet_id, user_id)
 
-    # پیام شرط (ریپلای روی پیام شروع‌کننده)
     msg = bot.send_message(m.chat.id, text, reply_markup=kb, reply_to_message_id=m.message_id)
 
-    # ذخیره message_id
     with db_lock:
         with sqlite3.connect(DB_PATH) as conn:
             cur = conn.cursor()
             cur.execute("UPDATE bets SET message_id=? WHERE bet_id=?", (msg.message_id, bet_id))
             conn.commit()
 
-
 @bot.callback_query_handler(func=lambda c: c.data and c.data.startswith("bet:"))
 def cb_bet(c):
-    # جواب کوتاه فوری به تلگرام تا دکمه "مشغول" نشه
     try:
         bot.answer_callback_query(c.id)
     except:
@@ -456,7 +811,6 @@ def cb_bet(c):
         action = parts[1]
         bet_id = int(parts[2])
     except Exception as e:
-        # invalid callback data
         try:
             bot.answer_callback_query(c.id, "❌ داده نامعتبر.")
         except:
@@ -464,7 +818,6 @@ def cb_bet(c):
         return
 
     try:
-        # خواندن اطلاعات شرط (بدون نگه داشتن لاک طولانی)
         with db_lock:
             with sqlite3.connect(DB_PATH) as conn:
                 cur = conn.cursor()
@@ -477,28 +830,23 @@ def cb_bet(c):
         creator_id, amount, state, joined_id, message_id = row
         user_id = c.from_user.id
 
-        # --- HANDLE CANCEL ---
         if action == "cancel":
             if user_id != creator_id:
                 return bot.answer_callback_query(c.id, "فقط سازنده می‌تواند لغو کند.")
             if state != "open":
                 return bot.answer_callback_query(c.id, "این شرط قبلاً بسته شده است.")
 
-            # بازگرداندن مبلغ به سازنده — change_balance خودش قفل می‌گیرد (RLock)
             change_balance(creator_id, amount)
 
-            # علامت‌گذاری شرط به عنوان cancelled
             with db_lock:
                 with sqlite3.connect(DB_PATH) as conn:
                     cur = conn.cursor()
                     cur.execute("UPDATE bets SET state='cancelled' WHERE bet_id=?", (bet_id,))
                     conn.commit()
 
-            # ویرایش پیام شرط (استفاده از message_id ذخیره شده)
             try:
                 bot.edit_message_text("❌ این شرط توسط سازنده لغو شد.", c.message.chat.id, message_id)
             except Exception:
-                # fallback: اگر استفاده از c.message مشکل داشت، تلاش با chat_id/message_id ذخیره‌شده
                 try:
                     bot.edit_message_text("❌ این شرط توسط سازنده لغو شد.", c.message.chat.id, message_id)
                 except:
@@ -506,9 +854,7 @@ def cb_bet(c):
 
             return bot.answer_callback_query(c.id, "شرط لغو شد.")
 
-        # --- HANDLE JOIN ---
         elif action == "join":
-            # دوباره وضعیت را چک می‌کنیم در لحظهٔ پیوستن (برای جلوگیری از race)
             with db_lock:
                 with sqlite3.connect(DB_PATH) as conn:
                     cur = conn.cursor()
@@ -529,28 +875,22 @@ def cb_bet(c):
             if bal < amount:
                 return bot.answer_callback_query(c.id, "موجودی کافی ندارید.")
 
-            # انجام تراکنش برای بازیکن دوم (این تابع قفل را مدیریت می‌کند)
             change_balance(user_id, -amount)
 
-            # محاسبه مالیات و جایزه
             tax = (amount * 2 * BET_TAX_PERCENT) // 100
             prize = amount * 2 - tax
 
-            # انتخاب برنده
             winner_id = random.choice([creator_id, user_id])
             loser_id = creator_id if winner_id == user_id else user_id
 
-            # واریز جایزه به برنده
             change_balance(winner_id, prize)
 
-            # بروزرسانی وضعیت شرط
             with db_lock:
                 with sqlite3.connect(DB_PATH) as conn:
                     cur = conn.cursor()
                     cur.execute("UPDATE bets SET state='closed', player_joined_id=? WHERE bet_id=?", (user_id, bet_id))
                     conn.commit()
 
-            # ویرایش پیام با نتیجه
             text = BET_RESULT_TEXT.format(
                 winner=user_display_from_id(winner_id),
                 loser=user_display_from_id(loser_id),
@@ -568,7 +908,6 @@ def cb_bet(c):
             return bot.answer_callback_query(c.id, "شرطبندی انجام شد!")
 
     except Exception as e:
-        # لاگ کن برای دیباگ (print یا logging)
         print("Bet Callback Error:", repr(e))
         try:
             bot.answer_callback_query(c.id, "❌ خطا رخ داد. دوباره تلاش کنید.")
@@ -598,7 +937,6 @@ def cb_admin(c):
     parts = c.data.split(":")
     action = parts[1]
 
-    # لیست کاربران (بر اساس بیشترین الماس)
     if action == "list_users":
         with sqlite3.connect(DB_PATH) as conn:
             cur = conn.cursor()
@@ -638,7 +976,6 @@ def cb_admin(c):
         bot.send_message(c.from_user.id, text)
         return
 
-# دستور تنظیم الماس توسط ادمین
 @bot.message_handler(commands=['setdiamonds'])
 def cmd_setdiamonds(m: types.Message):
     if not is_admin(m.from_user.id):
@@ -658,25 +995,37 @@ def cmd_setdiamonds(m: types.Message):
 
 # ----------------- PRIVATE MENU -----------------
 @bot.message_handler(func=lambda m: in_private(m) and isinstance(m.text, str) and m.text.strip() in [
-    "≼ سـلـفـ 𝐕𝐢𝐏 ≽", "≼ خـدمـاتـ 𝐕𝐢𝐏 ≽", "≼ شـارژ مـوجـودی 💳 ≽", "≼ الماس رایگان ≽"
+    "≼ سـلـفـ 𝐕𝐢𝐏 ≽", "≼ خـدمـاتـ 𝐕𝐢𝐏 ≽", "≼ شـارژ مـوجـودی 💳 ≽", "≼ الماس رایگان ≽", "≼ پروفایل ≽"
 ])
 def private_menu(m: types.Message):
     txt = m.text.strip()
-    if txt in ("≼ سـلـفـ 𝐕𝐢𝐏 ≽", "≼ خـدمـاتـ 𝐕𝐢𝐏 ≽"):
-        return bot.reply_to(m, "در حال آپدیت...")
-    if txt == "≼ شـارژ مـوجـودی 💳 ≽":
+    if txt == "≼ سـلـفـ 𝐕𝐢𝐏 ≽":
+        cmd_self(m)
+    elif txt == "≼ خـدمـاتـ 𝐕𝐢𝐏 ≽":
+        cmd_services(m)
+    elif txt == "≼ شـارژ مـوجـودی 💳 ≽":
         return bot.reply_to(m, "برای خرید به آیدی‌های زیر مراجعه کنید:\n👤 مالک: @AliZord_yt\n🛡 پشتیبانی: @ABOLRNRNR")
-    if txt == "≼ الماس رایگان ≽":
+    elif txt == "≼ الماس رایگان ≽":
         count = get_ref_count(m.from_user.id)
         link = f"https://t.me/{BOT_USERNAME}?start={m.from_user.id}"
         return bot.reply_to(m, FREE_DIAMOND_TEXT.format(count=count, link=link))
+    elif txt == "≼ پروفایل ≽":
+        cmd_profile(m)
 
-# ----------------- BALANCE (ریپلای + عکس) -----------------
+# ----------------- BALANCE -----------------
+FREE_DIAMOND_TEXT = (
+    "💎 با دعوت دوستان خود\n"
+    "50 الماس دریافت کنید! فقط تا امروز..\n"
+    "👥 کل دعوتی‌ها: {count}\n"
+    "🔗 لینک دعوت: {link}"
+)
+
+BALANCE_TEXT = "💎 موجودی شما:\nالماس 💎: {diamonds}\nبه تومان: {toman:,}"
+
 @bot.message_handler(func=lambda m: isinstance(m.text, str) and m.text.strip() == "موجودی")
 def cmd_balance(m: types.Message):
     user_id = m.from_user.id
     if is_owner(user_id):
-        # نمایش بینهایت برای مالک
         text = "💎 موجودی شما:\nالماس 💎: ∞\nبه تومان: ∞"
         return bot.reply_to(m, text)
     bal = get_balance(user_id)
@@ -696,8 +1045,30 @@ def cmd_balance(m: types.Message):
     else:
         bot.reply_to(m, text)
 
+# ----------------- یوزربات -----------------
+async def userbot_worker():
+    @userbot.on_message()
+    async def handle_user_messages(client, message: PyroMessage):
+        # اینجا کارهای یوزربات انجام میشه
+        pass
+
+    await userbot.start()
+    print("✅ یوزربات متصل شد!")
+    await userbot.idle()
+
 # ----------------- MAIN -----------------
-if __name__ == "__main__":
+def run_bot():
     init_db()
-    print("✅ VIP Bot v18 ران شد (نسخه مدیریت + الماس بینهایت برای مالک).")
+    
+    def start_userbot():
+        asyncio.run(userbot_worker())
+    
+    userbot_thread = threading.Thread(target=start_userbot)
+    userbot_thread.daemon = True
+    userbot_thread.start()
+    
+    print("✅ VIP Bot v19 ران شد (نسخه ترکیبی ربات + یوزربات).")
     bot.infinity_polling()
+
+if __name__ == "__main__":
+    run_bot()
