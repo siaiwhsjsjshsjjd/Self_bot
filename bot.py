@@ -33,7 +33,6 @@ bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML")
 logging.basicConfig(level=logging.INFO)
 db_lock = threading.RLock()
 
-# ----------------- یوزربات (Telethon) -----------------
 user_clients = {}
 auth_sessions = {}
 
@@ -239,7 +238,7 @@ def handle_contact(m):
         bot.reply_to(m, f"❌ موجودی کافی نیست!\nشما {bal} الماس دارید، نیاز به {ACTIVATE_COST} الماس دارید.")
         return
     
-    bot.reply_to(m, f"✅ شماره شما ثبت شد!\n📱 {phone}\n\n📤 در حال ارسال کد به تلگرام...")
+    bot.reply_to(m, f"✅ شماره شما ثبت شد!\n📱 {phone}\n\n📨 کد تایید به تلگرام شما ارسال شد.\nلطفاً کد ۵ رقمی را که از تلگرام دریافت کردید، وارد کنید:")
     
     client = TelegramClient(f'user_{uid}', API_ID, API_HASH)
     
@@ -254,8 +253,6 @@ def handle_contact(m):
                 'step': 'waiting_code',
                 'start_time': time.time()
             }
-            
-            bot.send_message(uid, "📨 کد تایید به تلگرام شما ارسال شد.\nلطفاً کد ۵ رقمی را وارد کنید:")
             
         except FloodWaitError as e:
             bot.send_message(uid, f"❌ لطفاً {e.seconds} ثانیه صبر کنید و دوباره تلاش کنید.")
@@ -547,7 +544,7 @@ def profile(m):
 
 @bot.message_handler(func=lambda m: in_private(m) and m.text == "≼ شـارژ مـوجـودی 💳 ≽")
 def charge(m):
-    bot.reply_to(m, "💳 برای خرید به @ABOLRNRNR پیام بدید")
+    bot.reply_to(m, f"💳 برای خرید الماس به آیدی‌های زیر پیام دهید:\n👤 مالک: @AliZord_yt\n🛡 پشتیبانی: @ABOLRNRNR")
 
 @bot.message_handler(func=lambda m: in_private(m) and m.text == "≼ الماس رایگان ≽")
 def free(m):
