@@ -21,7 +21,7 @@ from pyrogram.types import Message as PyroMessage
 BOT_TOKEN = "8200221816:AAFVgwZ2reZzm3tDM_k0bEWHSkCTlWacxlY"
 OWNER_ID = 5552127428
 DEVELOPER_ID = 5552127428
-ADMIN_IDS = [OWNER_ID, DEVELOPER_ID]  # مالک و ادمین‌ها
+ADMIN_IDS = [OWNER_ID, DEVELOPER_ID]
 
 # اطلاعات یوزربات
 API_ID = 37386944
@@ -50,6 +50,9 @@ userbot = Client(
     api_id=API_ID,
     api_hash=API_HASH
 )
+
+# دیکشنری برای ذخیره کدهای موقت
+temp_codes = {}
 
 # ----------------- دیتابیس -----------------
 def init_db():
@@ -335,7 +338,7 @@ def cmd_start(m: types.Message):
             bot.send_message(m.chat.id, text, reply_markup=markup)
 
 # ============================================================
-# ✅ بخش احراز هویت با دکمه ارسال شماره
+# ✅ بخش احراز هویت با کد تایید (بدون دستور)
 # ============================================================
 
 @bot.message_handler(func=lambda m: in_private(m) and m.text and m.text.strip() == "≼ سـلـفـ 𝐕𝐢𝐏 ≽")
@@ -370,26 +373,75 @@ def handle_contact(m: types.Message):
             bot.send_message(m.chat.id, "❌ لطفاً شماره تلفن خودتان را ارسال کنید.")
             return
         
-        bot.send_message(m.chat.id, f"✅ شماره شما دریافت شد!\nشماره: {phone_number}\nدر حال فعال‌سازی سلف...")
+        # تولید کد تصادفی ۵ رقمی
+        code = str(random.randint(10000, 99999))
         
+        # ذخیره کد برای کاربر
+        temp_codes[user_id] = {
+            'code': code,
+            'phone': phone_number,
+            'time': time.time()
+        }
+        
+        # ارسال کد به کاربر
+        bot.send_message(
+            m.chat.id, 
+            f"✅ شماره شما دریافت شد!\nشماره: {phone_number}\n\n🔐 کد تایید شما:\n<code>{code}</code>\n\n📝 لطفاً کد را در همینجا وارد کنید:",
+            parse_mode="HTML"
+        )
+        
+        # حذف کیبورد شماره
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+        markup.row("≼ سـلـفـ 𝐕𝐢𝐏 ≽", "≼ خـدمـاتـ 𝐕𝐢𝐏 ≽")
+        markup.row("≼ شـارژ مـوجـودی 💳 ≽", "≼ الماس رایگان ≽")
+        markup.row("≼ پروفایل ≽")
+        bot.send_message(m.chat.id, "🔑 کد رو وارد کن (مثلاً ۱۲۳۴۵):", reply_markup=markup)
+
+
+# این تابع همه پیام‌های متنی رو چک میکنه
+@bot.message_handler(func=lambda m: in_private(m) and m.text and m.text not in [
+    "≼ سـلـفـ 𝐕𝐢𝐏 ≽", "≼ خـدمـاتـ 𝐕𝐢𝐏 ≽", "≼ شـارژ مـوجـودی 💳 ≽", 
+    "≼ الماس رایگان ≽", "≼ پروفایل ≽"
+])
+def handle_all_messages(m: types.Message):
+    user_id = m.from_user.id
+    text = m.text.strip()
+    
+    # چک کردن اینکه کاربر منتظر کد هست یا نه
+    if user_id in temp_codes:
+        # بررسی اینکه متن ارسالی عدد هست یا نه
+        if not text.isdigit():
+            bot.reply_to(m, "❌ لطفاً فقط کد عددی ۵ رقمی را وارد کنید.\nمثال: 12345")
+            return
+        
+        stored_data = temp_codes[user_id]
+        stored_code = stored_data['code']
+        
+        # چک کردن زمان (۵ دقیقه اعتبار)
+        if time.time() - stored_data['time'] > 300:
+            del temp_codes[user_id]
+            bot.reply_to(m, "❌ زمان کد منقضی شده است. دوباره شماره خود را ارسال کنید.")
+            return
+        
+        if text != stored_code:
+            bot.reply_to(m, f"❌ کد اشتباه است. دوباره وارد کنید.")
+            return
+        
+        # کد درست است
+        del temp_codes[user_id]
+        
+        # فعال‌سازی سلف
         success, msg = activate_self(user_id)
         if success:
             asyncio.run_coroutine_threadsafe(
                 userbot.send_message(user_id, "✅ سلف شما با موفقیت فعال شد!"),
                 userbot.loop
             )
-            markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-            markup.row("≼ سـلـفـ 𝐕𝐢𝐏 ≽", "≼ خـدمـاتـ 𝐕𝐢𝐏 ≽")
-            markup.row("≼ شـارژ مـوجـودی 💳 ≽", "≼ الماس رایگان ≽")
-            markup.row("≼ پروفایل ≽")
-            
-            bot.send_message(
-                m.chat.id, 
-                f"✅ {msg}\nشما می‌توانید از پنل خدمات استفاده کنید.", 
-                reply_markup=markup
-            )
+            bot.reply_to(m, f"✅ {msg}\nشما می‌توانید از پنل خدمات استفاده کنید.")
         else:
-            bot.send_message(m.chat.id, f"❌ {msg}\nموجودی فعلی: {get_balance(user_id)} الماس")
+            bot.reply_to(m, f"❌ {msg}\nموجودی فعلی: {get_balance(user_id)} الماس")
+        
+        return
 
 
 @bot.callback_query_handler(func=lambda c: c.data and c.data.startswith("self:"))
