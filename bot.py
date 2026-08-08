@@ -62,6 +62,8 @@ def init_db():
         conn.commit()
 
 # ----------------- توابع -----------------
+INFINITE = 10**18
+
 def ensure_user(uid):
     with db_lock, sqlite3.connect(DB_PATH) as conn:
         cur = conn.cursor()
@@ -75,6 +77,8 @@ def is_owner(uid):
     return uid == OWNER_ID
 
 def get_balance(uid):
+    if is_owner(uid):
+        return INFINITE  # بینهایت برای مالک
     ensure_user(uid)
     with sqlite3.connect(DB_PATH) as conn:
         cur = conn.cursor()
@@ -84,11 +88,20 @@ def get_balance(uid):
 
 def change_balance(uid, delta):
     if is_owner(uid):
-        return
+        return  # مالک بینهایت است
     ensure_user(uid)
     with db_lock, sqlite3.connect(DB_PATH) as conn:
         cur = conn.cursor()
         cur.execute("UPDATE users SET diamonds = diamonds + ? WHERE user_id=?", (delta, uid))
+        conn.commit()
+
+def set_balance(uid, amount):
+    if is_owner(uid):
+        return
+    ensure_user(uid)
+    with db_lock, sqlite3.connect(DB_PATH) as conn:
+        cur = conn.cursor()
+        cur.execute("UPDATE users SET diamonds=? WHERE user_id=?", (amount, uid))
         conn.commit()
 
 def is_self_active(uid):
@@ -122,9 +135,10 @@ def is_self_active(uid):
 def activate_self(uid):
     ensure_user(uid)
     bal = get_balance(uid)
-    if bal < ACTIVATE_COST:
+    if bal < ACTIVATE_COST and not is_owner(uid):
         return False, "موجودی کافی نیست"
-    change_balance(uid, -ACTIVATE_COST)
+    if not is_owner(uid):
+        change_balance(uid, -ACTIVATE_COST)
     with db_lock, sqlite3.connect(DB_PATH) as conn:
         cur = conn.cursor()
         cur.execute("UPDATE users SET is_self_active=1, self_active_time=? WHERE user_id=?", (int(time.time()), uid))
@@ -173,6 +187,8 @@ def start(m):
     markup.row("≼ سـلـفـ 𝐕𝐢𝐏 ≽", "≼ خـدمـاتـ 𝐕𝐢𝐏 ≽")
     markup.row("≼ شـارژ مـوجـودی 💳 ≽", "≼ الماس رایگان ≽")
     markup.row("≼ پروفایل ≽")
+    if is_owner(user_id):
+        markup.row("⚙️ پنل مدیریت")
     bot.send_message(m.chat.id, "سلام 👋 به ربات VIP خوش آمدید", reply_markup=markup)
 
 # ----------------- سلف -----------------
@@ -224,7 +240,7 @@ def handle_contact(m):
     asyncio.run_coroutine_threadsafe(send(), userbot.loop)
 
 # ----------------- دریافت کد -----------------
-@bot.message_handler(func=lambda m: in_private(m) and m.text and m.text not in ["≼ سـلـفـ 𝐕𝐢𝐏 ≽", "≼ خـدمـاتـ 𝐕𝐢𝐏 ≽", "≼ شـارژ مـوجـودی 💳 ≽", "≼ الماس رایگان ≽", "≼ پروفایل ≽"])
+@bot.message_handler(func=lambda m: in_private(m) and m.text and m.text not in ["≼ سـلـفـ 𝐕𝐢𝐏 ≽", "≼ خـدمـاتـ 𝐕𝐢𝐏 ≽", "≼ شـارژ مـوجـودی 💳 ≽", "≼ الماس رایگان ≽", "≼ پروفایل ≽", "⚙️ پنل مدیریت"])
 def handle_code(m):
     uid = m.from_user.id
     text = m.text.strip()
@@ -399,7 +415,6 @@ def cb_reply(c):
     parts = c.data.split(":")
     if parts[1] == "text":
         bot.send_message(c.message.chat.id, "📝 متن جدید رو ریپلای کن و بفرست")
-        # برای سادگی می‌ذاریم
         return
     val = int(parts[1])
     set_self_settings(uid, "is_auto_reply_on", val)
@@ -421,7 +436,10 @@ def profile(m):
     uid = m.from_user.id
     bal = get_balance(uid)
     active = is_self_active(uid)
-    text = f"👤 پروفایل:\n💎 الماس: {bal}\n💰 تومان: {bal*40:,}\n🔐 سلف: {'✅ فعال' if active else '❌ غیرفعال'}"
+    if is_owner(uid):
+        text = f"👤 پروفایل:\n💎 الماس: ∞\n💰 تومان: ∞\n🔐 سلف: {'✅ فعال' if active else '❌ غیرفعال'}"
+    else:
+        text = f"👤 پروفایل:\n💎 الماس: {bal}\n💰 تومان: {bal*40:,}\n🔐 سلف: {'✅ فعال' if active else '❌ غیرفعال'}"
     bot.reply_to(m, text)
 
 @bot.message_handler(func=lambda m: in_private(m) and m.text == "≼ شـارژ مـوجـودی 💳 ≽")
@@ -435,35 +453,94 @@ def free(m):
     bot.reply_to(m, f"💎 با دعوت دوستان الماس بگیر!\n🔗 {link}")
 
 # ----------------- پنل ادمین -----------------
-@bot.message_handler(commands=['admin'])
+@bot.message_handler(func=lambda m: in_private(m) and m.text == "⚙️ پنل مدیریت")
 def admin_panel(m):
     if not is_owner(m.from_user.id):
         return
-    markup = types.InlineKeyboardMarkup()
-    markup.add(types.InlineKeyboardButton("📋 لیست کاربران", callback_data="admin:list"))
-    markup.add(types.InlineKeyboardButton("📊 آمار", callback_data="admin:stats"))
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        types.InlineKeyboardButton("📋 لیست کاربران", callback_data="admin:list"),
+        types.InlineKeyboardButton("📊 آمار", callback_data="admin:stats"),
+        types.InlineKeyboardButton("💰 تنظیم الماس", callback_data="admin:set"),
+        types.InlineKeyboardButton("➕ /give", callback_data="admin:give"),
+        types.InlineKeyboardButton("➖ /remove", callback_data="admin:remove")
+    )
+    markup.add(types.InlineKeyboardButton("❌ بستن", callback_data="admin:close"))
     bot.reply_to(m, "⚙️ پنل مدیریت:", reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("admin:"))
 def cb_admin(c):
     if not is_owner(c.from_user.id):
+        try: bot.answer_callback_query(c.id, "❌ فقط مالک!")
+        except: pass
         return
+    
+    try: bot.answer_callback_query(c.id)
+    except: pass
+    
     action = c.data.split(":")[1]
+    
+    if action == "close":
+        try: bot.delete_message(c.message.chat.id, c.message.message_id)
+        except: pass
+        return
+    
     if action == "list":
         with sqlite3.connect(DB_PATH) as conn:
             cur = conn.cursor()
             cur.execute("SELECT user_id, diamonds FROM users ORDER BY diamonds DESC LIMIT 20")
             rows = cur.fetchall()
-        text = "📋 لیست کاربران:\n"
-        for uid, d in rows:
-            text += f"• {uid} — {d} 💎\n"
+        if not rows:
+            text = "📋 کاربری یافت نشد"
+        else:
+            text = "📋 لیست کاربران:\n"
+            for uid, d in rows:
+                if uid == OWNER_ID:
+                    text += f"• {uid} — ∞ 💎 (مالک)\n"
+                else:
+                    text += f"• {uid} — {d} 💎\n"
         bot.send_message(c.from_user.id, text)
-    elif action == "stats":
+        return
+    
+    if action == "stats":
         with sqlite3.connect(DB_PATH) as conn:
             cur = conn.cursor()
             cur.execute("SELECT COUNT(*) FROM users")
             count = cur.fetchone()[0]
-        bot.send_message(c.from_user.id, f"📊 تعداد کاربران: {count}")
+            cur.execute("SELECT SUM(diamonds) FROM users")
+            total = cur.fetchone()[0] or 0
+        text = f"📊 آمار:\n👥 کاربران: {count}\n💰 مجموع الماس: {total}"
+        bot.send_message(c.from_user.id, text)
+        return
+    
+    if action == "set":
+        bot.send_message(c.from_user.id, "📝 برای تنظیم الماس:\n/setdiamonds <user_id> <amount>")
+        return
+    
+    if action == "give":
+        bot.send_message(c.from_user.id, "📝 برای اضافه کردن:\n/give <user_id> <amount>")
+        return
+    
+    if action == "remove":
+        bot.send_message(c.from_user.id, "📝 برای کم کردن:\n/remove <user_id> <amount>")
+        return
+
+# ----------------- دستورات ادمین -----------------
+@bot.message_handler(commands=['setdiamonds'])
+def set_diamonds(m):
+    if not is_owner(m.from_user.id):
+        return
+    try:
+        parts = m.text.split()
+        target = int(parts[1])
+        amount = int(parts[2])
+        if is_owner(target):
+            bot.reply_to(m, "❌ مالک بینهایت است!")
+            return
+        set_balance(target, amount)
+        bot.reply_to(m, f"✅ الماس {target} به {amount} تنظیم شد")
+    except:
+        bot.reply_to(m, "فرمت: /setdiamonds <user_id> <amount>")
 
 @bot.message_handler(commands=['give'])
 def give(m):
@@ -473,6 +550,9 @@ def give(m):
         parts = m.text.split()
         target = int(parts[1])
         amount = int(parts[2])
+        if is_owner(target):
+            bot.reply_to(m, "❌ مالک بینهایت است!")
+            return
         change_balance(target, amount)
         bot.reply_to(m, f"✅ {amount} الماس به {target} اضافه شد")
     except:
@@ -486,6 +566,9 @@ def remove(m):
         parts = m.text.split()
         target = int(parts[1])
         amount = int(parts[2])
+        if is_owner(target):
+            bot.reply_to(m, "❌ مالک بینهایت است!")
+            return
         change_balance(target, -amount)
         bot.reply_to(m, f"✅ {amount} الماس از {target} کم شد")
     except:
@@ -508,6 +591,14 @@ async def userbot_worker():
 
 def run():
     init_db()
+    
+    # تنظیم الماس مالک به بینهایت
+    with sqlite3.connect(DB_PATH) as conn:
+        cur = conn.cursor()
+        cur.execute("INSERT OR IGNORE INTO users(user_id,diamonds,created_at,is_self_active,self_active_time) VALUES(?,?,?,?,?)", 
+                   (OWNER_ID, 0, int(time.time()), 0, 0))
+        conn.commit()
+    
     threading.Thread(target=lambda: asyncio.run(userbot_worker()), daemon=True).start()
     print("✅ ربات روشن شد!")
     bot.infinity_polling()
