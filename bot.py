@@ -34,7 +34,9 @@ bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML")
 logging.basicConfig(level=logging.INFO)
 db_lock = threading.RLock()
 
-# ----------------- یوزربات با سشن ثابت -----------------
+# ============================================================
+# یوزربات با سشن ثابت (همون فایلی که از Termux آوردی)
+# ============================================================
 client = TelegramClient("main_session", API_ID, API_HASH)
 auth_sessions = {}
 
@@ -222,7 +224,7 @@ def cmd_self(m):
     
     if is_self_active(uid):
         markup = types.InlineKeyboardMarkup()
-        markup.add(types.InlineKeyboardButton("🔴 غیرفعال کردن", callback_data="self:off", color="danger"))
+        markup.add(types.InlineKeyboardButton("🔴 غیرفعال کردن", callback_data="self:off"))
         bot.send_message(m.chat.id, "✅ سلف شما فعال است!", reply_markup=markup)
     else:
         markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
@@ -371,14 +373,14 @@ def cmd_services(m):
     
     markup = types.InlineKeyboardMarkup(row_width=2)
     markup.add(
-        types.InlineKeyboardButton("📝 حالت متن", callback_data="svc:text", color="primary"),
-        types.InlineKeyboardButton("⏰ ساعت", callback_data="svc:clock", color="primary"),
-        types.InlineKeyboardButton("🔤 فونت", callback_data="svc:font", color="primary"),
-        types.InlineKeyboardButton("🎬 اکشن", callback_data="svc:action", color="primary"),
-        types.InlineKeyboardButton("🤖 منشی", callback_data="svc:reply", color="primary"),
-        types.InlineKeyboardButton("📊 وضعیت", callback_data="svc:status", color="secondary")
+        types.InlineKeyboardButton("📝 حالت متن", callback_data="svc:text"),
+        types.InlineKeyboardButton("⏰ ساعت", callback_data="svc:clock"),
+        types.InlineKeyboardButton("🔤 فونت", callback_data="svc:font"),
+        types.InlineKeyboardButton("🎬 اکشن", callback_data="svc:action"),
+        types.InlineKeyboardButton("🤖 منشی", callback_data="svc:reply"),
+        types.InlineKeyboardButton("📊 وضعیت", callback_data="svc:status")
     )
-    markup.add(types.InlineKeyboardButton("❌ بستن", callback_data="svc:close", color="danger"))
+    markup.add(types.InlineKeyboardButton("❌ بستن", callback_data="svc:close"))
     bot.send_message(m.chat.id, "🎯 پنل خدمات:", reply_markup=markup)
 
 # ----------------- کالبک خدمات -----------------
@@ -423,12 +425,12 @@ def cb_service(c):
         current = get_user_setting(uid, 'text_mode') or 'normal'
         markup = types.InlineKeyboardMarkup(row_width=2)
         markup.add(
-            types.InlineKeyboardButton("عادی" + (" ✅" if current == 'normal' else ""), callback_data="text:normal", color="secondary"),
-            types.InlineKeyboardButton("پررنگ" + (" ✅" if current == 'bold' else ""), callback_data="text:bold", color="primary"),
-            types.InlineKeyboardButton("نقل قول" + (" ✅" if current == 'quote' else ""), callback_data="text:quote", color="primary"),
-            types.InlineKeyboardButton("اسپویلر" + (" ✅" if current == 'spoiler' else ""), callback_data="text:spoiler", color="primary")
+            types.InlineKeyboardButton("عادی" + (" ✅" if current == 'normal' else ""), callback_data="text:normal"),
+            types.InlineKeyboardButton("پررنگ" + (" ✅" if current == 'bold' else ""), callback_data="text:bold"),
+            types.InlineKeyboardButton("نقل قول" + (" ✅" if current == 'quote' else ""), callback_data="text:quote"),
+            types.InlineKeyboardButton("اسپویلر" + (" ✅" if current == 'spoiler' else ""), callback_data="text:spoiler")
         )
-        markup.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data="svc:back", color="secondary"))
+        markup.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data="svc:back"))
         bot.edit_message_text("📝 **حالت متن**\n\nیکی را انتخاب کنید:", c.message.chat.id, c.message.message_id, reply_markup=markup, parse_mode="HTML")
         return
     
@@ -436,10 +438,10 @@ def cb_service(c):
         current = get_user_setting(uid, 'clock_mode') or 0
         markup = types.InlineKeyboardMarkup()
         markup.add(
-            types.InlineKeyboardButton("روشن" + (" ✅" if current == 1 else ""), callback_data="clock:1", color="success"),
-            types.InlineKeyboardButton("خاموش" + (" ✅" if current == 0 else ""), callback_data="clock:0", color="danger")
+            types.InlineKeyboardButton("روشن" + (" ✅" if current == 1 else ""), callback_data="clock:1"),
+            types.InlineKeyboardButton("خاموش" + (" ✅" if current == 0 else ""), callback_data="clock:0")
         )
-        markup.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data="svc:back", color="secondary"))
+        markup.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data="svc:back"))
         bot.edit_message_text("⏰ **ساعت**\n\nنمایش ساعت کنار اسم:", c.message.chat.id, c.message.message_id, reply_markup=markup, parse_mode="HTML")
         return
     
@@ -447,10 +449,10 @@ def cb_service(c):
         current = get_user_setting(uid, 'font_mode') or 'font1'
         markup = types.InlineKeyboardMarkup(row_width=2)
         markup.add(
-            types.InlineKeyboardButton("فونت ۱" + (" ✅" if current == 'font1' else ""), callback_data="font:font1", color="primary"),
-            types.InlineKeyboardButton("فونت ۲" + (" ✅" if current == 'font2' else ""), callback_data="font:font2", color="primary")
+            types.InlineKeyboardButton("فونت ۱" + (" ✅" if current == 'font1' else ""), callback_data="font:font1"),
+            types.InlineKeyboardButton("فونت ۲" + (" ✅" if current == 'font2' else ""), callback_data="font:font2")
         )
-        markup.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data="svc:back", color="secondary"))
+        markup.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data="svc:back"))
         bot.edit_message_text("🔤 **فونت**\n\nانتخاب فونت:", c.message.chat.id, c.message.message_id, reply_markup=markup, parse_mode="HTML")
         return
     
@@ -458,12 +460,12 @@ def cb_service(c):
         current = get_user_setting(uid, 'action_mode') or 'none'
         markup = types.InlineKeyboardMarkup(row_width=2)
         markup.add(
-            types.InlineKeyboardButton("خاموش" + (" ✅" if current == 'none' else ""), callback_data="action:none", color="danger"),
-            types.InlineKeyboardButton("ویس" + (" ✅" if current == 'voice' else ""), callback_data="action:voice", color="primary"),
-            types.InlineKeyboardButton("بازی" + (" ✅" if current == 'game' else ""), callback_data="action:game", color="primary"),
-            types.InlineKeyboardButton("استیکر" + (" ✅" if current == 'sticker' else ""), callback_data="action:sticker", color="primary")
+            types.InlineKeyboardButton("خاموش" + (" ✅" if current == 'none' else ""), callback_data="action:none"),
+            types.InlineKeyboardButton("ویس" + (" ✅" if current == 'voice' else ""), callback_data="action:voice"),
+            types.InlineKeyboardButton("بازی" + (" ✅" if current == 'game' else ""), callback_data="action:game"),
+            types.InlineKeyboardButton("استیکر" + (" ✅" if current == 'sticker' else ""), callback_data="action:sticker")
         )
-        markup.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data="svc:back", color="secondary"))
+        markup.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data="svc:back"))
         bot.edit_message_text("🎬 **اکشن**\n\nانتخاب اکشن:", c.message.chat.id, c.message.message_id, reply_markup=markup, parse_mode="HTML")
         return
     
@@ -471,10 +473,10 @@ def cb_service(c):
         current = get_user_setting(uid, 'reply_mode') or 0
         markup = types.InlineKeyboardMarkup()
         markup.add(
-            types.InlineKeyboardButton("روشن" + (" ✅" if current == 1 else ""), callback_data="reply:1", color="success"),
-            types.InlineKeyboardButton("خاموش" + (" ✅" if current == 0 else ""), callback_data="reply:0", color="danger")
+            types.InlineKeyboardButton("روشن" + (" ✅" if current == 1 else ""), callback_data="reply:1"),
+            types.InlineKeyboardButton("خاموش" + (" ✅" if current == 0 else ""), callback_data="reply:0")
         )
-        markup.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data="svc:back", color="secondary"))
+        markup.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data="svc:back"))
         bot.edit_message_text("🤖 **منشی**\n\nپاسخ‌گویی خودکار:", c.message.chat.id, c.message.message_id, reply_markup=markup, parse_mode="HTML")
         return
     
@@ -566,8 +568,8 @@ def cmd_bet(m):
     
     markup = types.InlineKeyboardMarkup()
     markup.add(
-        types.InlineKeyboardButton("❌ لغو", callback_data=f"bet:cancel:{bet_id}", color="danger"),
-        types.InlineKeyboardButton("✅ پیوستن", callback_data=f"bet:join:{bet_id}", color="success")
+        types.InlineKeyboardButton("❌ لغو", callback_data=f"bet:cancel:{bet_id}"),
+        types.InlineKeyboardButton("✅ پیوستن", callback_data=f"bet:join:{bet_id}")
     )
     
     msg = bot.send_message(
@@ -661,7 +663,6 @@ def cb_bet(c):
             cur.execute("UPDATE bets SET state='closed', player_joined_id=? WHERE bet_id=?", (uid, bet_id))
             conn.commit()
         
-        # گرفتن اطلاعات برنده و بازنده
         try:
             winner = bot.get_chat(winner_id)
             winner_name = winner.first_name or str(winner_id)
@@ -686,15 +687,23 @@ def cb_bet(c):
         bot.answer_callback_query(c.id, "✅ شرط انجام شد!")
 
 # ============================================================
-# انتقال الماس (گروه)
+# انتقال الماس (گروه + پیوی)
 # ============================================================
 
-@bot.message_handler(func=lambda m: in_group(m) and m.text and m.text.startswith("انتقال"))
+@bot.message_handler(func=lambda m: m.text and m.text.startswith("انتقال"))
 def transfer_diamonds(m):
+    # تشخیص اینکه در پیوی هست یا گروه
+    is_private = m.chat.type == "private"
+    is_group = m.chat.type in ["group", "supergroup"]
+    
+    # فقط در گروه یا پیوی اجرا بشه
+    if not is_private and not is_group:
+        return
+    
     parts = m.text.split()
     
     if len(parts) < 2:
-        bot.reply_to(m, "❌ فرمت: انتقال <مقدار> [آیدی]\nمثال: انتقال 20 @username")
+        bot.reply_to(m, "❌ فرمت: انتقال <مقدار> [آیدی/یوزرنیم]\nمثال: انتقال 20 @username\nیا با ریپلای: انتقال 20")
         return
     
     try:
@@ -706,6 +715,9 @@ def transfer_diamonds(m):
         return
     
     # دریافت گیرنده
+    receiver_id = None
+    
+    # اول بررسی ریپلای
     if m.reply_to_message:
         receiver_id = m.reply_to_message.from_user.id
     elif len(parts) >= 3:
@@ -732,6 +744,9 @@ def transfer_diamonds(m):
         bot.reply_to(m, "❌ نمی‌تونی به خودت انتقال بدی!")
         return
     
+    # بررسی موجودی کاربر مقصد
+    ensure_user(receiver_id)
+    
     # مالیات ۵٪
     tax = int(amount * 0.05)
     total = amount + tax
@@ -741,6 +756,7 @@ def transfer_diamonds(m):
         bot.reply_to(m, f"❌ موجودی کافی نیست!\nنیاز: {total} الماس (شامل مالیات {tax})")
         return
     
+    # انجام انتقال
     if is_owner(sender_id):
         change_balance(receiver_id, amount)
         bot.reply_to(m, f"✅ {amount} الماس (مالک) به کاربر منتقل شد!")
@@ -748,6 +764,13 @@ def transfer_diamonds(m):
         change_balance(sender_id, -total)
         change_balance(receiver_id, amount)
         bot.reply_to(m, f"✅ {amount} الماس منتقل شد!\n🧾 مالیات: {tax} الماس")
+    
+    # اطلاع‌رسانی به گیرنده (اگه پیوی باشه)
+    try:
+        receiver_name = m.from_user.first_name or "کاربر"
+        bot.send_message(receiver_id, f"🎁 شما {amount} الماس از {receiver_name} دریافت کردید!")
+    except:
+        pass
 
 # ============================================================
 # منوها
@@ -788,14 +811,14 @@ def admin_panel(m):
     
     markup = types.InlineKeyboardMarkup(row_width=2)
     markup.add(
-        types.InlineKeyboardButton("📋 لیست کاربران", callback_data="admin:list", color="primary"),
-        types.InlineKeyboardButton("📊 آمار ربات", callback_data="admin:stats", color="primary"),
-        types.InlineKeyboardButton("➕ افزودن الماس", callback_data="admin:give", color="success"),
-        types.InlineKeyboardButton("➖ کم کردن الماس", callback_data="admin:remove", color="danger"),
-        types.InlineKeyboardButton("💰 تنظیم الماس", callback_data="admin:set", color="primary"),
-        types.InlineKeyboardButton("📢 ارسال همگانی", callback_data="admin:broadcast", color="primary")
+        types.InlineKeyboardButton("📋 لیست کاربران", callback_data="admin:list"),
+        types.InlineKeyboardButton("📊 آمار ربات", callback_data="admin:stats"),
+        types.InlineKeyboardButton("➕ افزودن الماس", callback_data="admin:give"),
+        types.InlineKeyboardButton("➖ کم کردن الماس", callback_data="admin:remove"),
+        types.InlineKeyboardButton("💰 تنظیم الماس", callback_data="admin:set"),
+        types.InlineKeyboardButton("📢 ارسال همگانی", callback_data="admin:broadcast")
     )
-    markup.add(types.InlineKeyboardButton("🔴 بستن پنل", callback_data="admin:close", color="danger"))
+    markup.add(types.InlineKeyboardButton("🔴 بستن پنل", callback_data="admin:close"))
     
     bot.reply_to(m, "⚙️ **پنل مدیریت**", reply_markup=markup, parse_mode="HTML")
 
