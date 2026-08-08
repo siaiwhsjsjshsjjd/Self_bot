@@ -20,7 +20,7 @@ from telethon.errors import (
 # ----------------- CONFIG -----------------
 BOT_TOKEN = "8200221816:AAFVgwZ2reZzm3tDM_k0bEWHSkCTlWacxlY"
 OWNER_ID = 5552127428
-ADMIN_IDS = [5552127428]  # لیست ادمین‌ها (مالک + ادمین‌های دیگه)
+ADMIN_IDS = [5552127428]
 
 API_ID = 37386944
 API_HASH = "d64069023db75d11ae5982f653069a98"
@@ -151,12 +151,6 @@ def set_user_phone(uid, phone):
         cur.execute("UPDATE users SET phone=? WHERE user_id=?", (phone, uid))
         conn.commit()
 
-def get_user_info(uid):
-    with sqlite3.connect(DB_PATH) as conn:
-        cur = conn.cursor()
-        cur.execute("SELECT user_id, diamonds, is_self_active, phone FROM users WHERE user_id=?", (uid,))
-        return cur.fetchone()
-
 def in_private(m):
     return m.chat.type == "private"
 
@@ -201,12 +195,6 @@ def handle_contact(m):
     
     phone = m.contact.phone_number
     set_user_phone(uid, phone)
-    
-    # اگر مالک است، مستقیم فعال کن
-    if is_owner(uid):
-        success, msg = activate_self(uid)
-        bot.reply_to(m, f"✅ {msg} (مالک)")
-        return
     
     bot.reply_to(m, f"✅ شماره شما ثبت شد!\n📱 {phone}\n\n📤 در حال ارسال کد به تلگرام...")
     
@@ -526,13 +514,11 @@ def cb_admin(c):
     
     action = c.data.split(":")[1]
     
-    # بستن پنل
     if action == "close":
         try: bot.delete_message(c.message.chat.id, c.message.message_id)
         except: pass
         return
     
-    # لیست کاربران
     if action == "list":
         with sqlite3.connect(DB_PATH) as conn:
             cur = conn.cursor()
@@ -555,7 +541,6 @@ def cb_admin(c):
         bot.send_message(c.from_user.id, text, parse_mode="HTML")
         return
     
-    # آمار ربات
     if action == "stats":
         with sqlite3.connect(DB_PATH) as conn:
             cur = conn.cursor()
@@ -576,22 +561,18 @@ def cb_admin(c):
         bot.send_message(c.from_user.id, text, parse_mode="HTML")
         return
     
-    # افزودن الماس
     if action == "give":
         bot.send_message(c.from_user.id, "📝 **افزودن الماس**\n\nفرمت:\n`/give <user_id> <amount>`\n\nمثال:\n`/give 123456789 100`", parse_mode="HTML")
         return
     
-    # کم کردن الماس
     if action == "remove":
         bot.send_message(c.from_user.id, "📝 **کم کردن الماس**\n\nفرمت:\n`/remove <user_id> <amount>`\n\nمثال:\n`/remove 123456789 50`", parse_mode="HTML")
         return
     
-    # تنظیم الماس
     if action == "set":
         bot.send_message(c.from_user.id, "📝 **تنظیم الماس**\n\nفرمت:\n`/setdiamonds <user_id> <amount>`\n\nمثال:\n`/setdiamonds 123456789 500`", parse_mode="HTML")
         return
     
-    # ارسال همگانی
     if action == "broadcast":
         bot.send_message(c.from_user.id, "📢 **ارسال همگانی**\n\nلطفاً پیام خود را به همراه این دستور ارسال کنید:\n`/broadcast <پیام>`\n\nمثال:\n`/broadcast سلام به همه!`", parse_mode="HTML")
         return
