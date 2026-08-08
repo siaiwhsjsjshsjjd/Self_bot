@@ -21,7 +21,7 @@ from pyrogram.types import Message as PyroMessage
 BOT_TOKEN = "8200221816:AAFVgwZ2reZzm3tDM_k0bEWHSkCTlWacxlY"
 OWNER_ID = 5552127428
 DEVELOPER_ID = 5552127428
-ADMIN_IDS = [OWNER_ID, DEVELOPER_ID]
+ADMIN_IDS = [OWNER_ID, DEVELOPER_ID]  # مالک و ادمین‌ها
 
 # اطلاعات یوزربات
 API_ID = 37386944
@@ -334,7 +334,10 @@ def cmd_start(m: types.Message):
         else:
             bot.send_message(m.chat.id, text, reply_markup=markup)
 
-# ----------------- SELF ACTIVATION -----------------
+# ============================================================
+# ✅ بخش احراز هویت با دکمه ارسال شماره
+# ============================================================
+
 @bot.message_handler(func=lambda m: in_private(m) and m.text and m.text.strip() == "≼ سـلـفـ 𝐕𝐢𝐏 ≽")
 def cmd_self(m: types.Message):
     user_id = m.from_user.id
@@ -346,10 +349,48 @@ def cmd_self(m: types.Message):
         markup.add(types.InlineKeyboardButton("❌ غیرفعال کردن سلف", callback_data="self:deactivate"))
         bot.send_message(m.chat.id, text, reply_markup=markup)
     else:
-        text = f"🔐 برای فعال سازی سلف باید احراز هویت کنید.\nهزینه فعال‌سازی: {ACTIVATE_COST} الماس\nهر ساعت {HOURLY_COST} الماس از موجودی شما کم می‌شود."
-        markup = types.InlineKeyboardMarkup()
-        markup.add(types.InlineKeyboardButton("✅ احراز هویت", callback_data="self:activate"))
+        text = f"🔐 برای فعال سازی سلف، شماره تلفن خود را ارسال کنید.\nهزینه فعال‌سازی: {ACTIVATE_COST} الماس\nهر ساعت {HOURLY_COST} الماس از موجودی شما کم می‌شود."
+        
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+        btn = types.KeyboardButton("📱 ارسال شماره تلفن", request_contact=True)
+        markup.add(btn)
+        
         bot.send_message(m.chat.id, text, reply_markup=markup)
+
+
+@bot.message_handler(content_types=['contact'])
+def handle_contact(m: types.Message):
+    user_id = m.from_user.id
+    ensure_user(user_id)
+    
+    if m.contact:
+        phone_number = m.contact.phone_number
+        
+        if m.contact.user_id != user_id:
+            bot.send_message(m.chat.id, "❌ لطفاً شماره تلفن خودتان را ارسال کنید.")
+            return
+        
+        bot.send_message(m.chat.id, f"✅ شماره شما دریافت شد!\nشماره: {phone_number}\nدر حال فعال‌سازی سلف...")
+        
+        success, msg = activate_self(user_id)
+        if success:
+            asyncio.run_coroutine_threadsafe(
+                userbot.send_message(user_id, "✅ سلف شما با موفقیت فعال شد!"),
+                userbot.loop
+            )
+            markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+            markup.row("≼ سـلـفـ 𝐕𝐢𝐏 ≽", "≼ خـدمـاتـ 𝐕𝐢𝐏 ≽")
+            markup.row("≼ شـارژ مـوجـودی 💳 ≽", "≼ الماس رایگان ≽")
+            markup.row("≼ پروفایل ≽")
+            
+            bot.send_message(
+                m.chat.id, 
+                f"✅ {msg}\nشما می‌توانید از پنل خدمات استفاده کنید.", 
+                reply_markup=markup
+            )
+        else:
+            bot.send_message(m.chat.id, f"❌ {msg}\nموجودی فعلی: {get_balance(user_id)} الماس")
+
 
 @bot.callback_query_handler(func=lambda c: c.data and c.data.startswith("self:"))
 def cb_self(c):
@@ -362,22 +403,14 @@ def cb_self(c):
     ensure_user(user_id)
     action = c.data.split(":")[1]
     
-    if action == "activate":
-        success, msg = activate_self(user_id)
-        if success:
-            asyncio.run_coroutine_threadsafe(
-                userbot.send_message(user_id, "✅ سلف شما با موفقیت فعال شد!"),
-                userbot.loop
-            )
-            bot.send_message(c.message.chat.id, f"✅ {msg}\nشما می‌توانید از پنل خدمات استفاده کنید.", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).row("≼ خـدمـاتـ 𝐕𝐢𝐏 ≽"))
-        else:
-            bot.send_message(c.message.chat.id, f"❌ {msg}\nموجودی فعلی: {get_balance(user_id)} الماس")
-    
-    elif action == "deactivate":
+    if action == "deactivate":
         deactivate_self(user_id)
         bot.send_message(c.message.chat.id, "❌ سلف شما غیرفعال شد.")
 
-# ----------------- SERVICES PANEL -----------------
+# ============================================================
+# ✅ بخش پنل خدمات
+# ============================================================
+
 @bot.message_handler(func=lambda m: in_private(m) and m.text and m.text.strip() == "≼ خـدمـاتـ 𝐕𝐢𝐏 ≽")
 def cmd_services(m: types.Message):
     user_id = m.from_user.id
@@ -914,16 +947,21 @@ def cb_bet(c):
         except:
             pass
 
-# ----------------- ADMIN PANEL -----------------
+# ============================================================
+# ✅ پنل مدیریت (فقط برای مالک و ادمین‌ها)
+# ============================================================
+
 @bot.message_handler(commands=['admin'])
 def cmd_admin(m: types.Message):
     if not is_admin(m.from_user.id):
-        return bot.reply_to(m, "❌ فقط ادمین‌ها می‌توانند از پنل مدیریت استفاده کنند.")
+        return bot.reply_to(m, "❌ شما اجازه دسترسی به پنل مدیریت را ندارید.")
+    
     kb = types.InlineKeyboardMarkup()
     kb.add(types.InlineKeyboardButton("📋 لیست کاربران", callback_data="admin:list_users"))
     kb.add(types.InlineKeyboardButton("⚙️ تنظیم الماس (راهنما)", callback_data="admin:set_help"))
     kb.add(types.InlineKeyboardButton("📊 آمار ربات", callback_data="admin:stats"))
     bot.reply_to(m, "⚙️ پنل مدیریت:", reply_markup=kb)
+
 
 @bot.callback_query_handler(func=lambda c: c.data and c.data.startswith("admin:"))
 def cb_admin(c):
@@ -931,9 +969,10 @@ def cb_admin(c):
         bot.answer_callback_query(c.id)
     except:
         pass
+    
     if not is_admin(c.from_user.id):
-        return bot.answer_callback_query(c.id, "اجازه ندارید.")
-
+        return bot.answer_callback_query(c.id, "❌ شما اجازه دسترسی به پنل مدیریت را ندارید.")
+    
     parts = c.data.split(":")
     action = parts[1]
 
@@ -976,10 +1015,53 @@ def cb_admin(c):
         bot.send_message(c.from_user.id, text)
         return
 
+
+@bot.message_handler(commands=['give'])
+def cmd_give(m: types.Message):
+    if not is_admin(m.from_user.id):
+        return bot.reply_to(m, "❌ شما اجازه دسترسی به این دستور را ندارید.")
+    try:
+        if m.reply_to_message:
+            target = m.reply_to_message.from_user.id
+            amount = int(m.text.split()[1])
+        else:
+            parts = m.text.split()
+            target = int(parts[1])
+            amount = int(parts[2])
+    except:
+        return bot.reply_to(m, "فرمت: ریپلای + /give <amount> یا /give <user_id> <amount>")
+    change_balance(target, amount)
+    bot.reply_to(m, f"✅ {amount} الماس به کاربر {target} اضافه شد.")
+
+
+@bot.message_handler(commands=['remove'])
+def cmd_remove(m: types.Message):
+    if not is_admin(m.from_user.id):
+        return bot.reply_to(m, "❌ شما اجازه دسترسی به این دستور را ندارید.")
+    try:
+        if m.reply_to_message:
+            target = m.reply_to_message.from_user.id
+            amount = int(m.text.split()[1])
+        else:
+            parts = m.text.split()
+            target = int(parts[1])
+            amount = int(parts[2])
+    except:
+        return bot.reply_to(m, "فرمت: ریپلای + /remove <amount> یا /remove <user_id> <amount>")
+    if is_owner(target):
+        return bot.reply_to(m, "❌ روی مالک نمی‌توان موجودی را کم کرد (مالک بینهایت است).")
+    bal = get_balance(target)
+    if amount > bal:
+        amount = bal
+    change_balance(target, -amount)
+    bot.reply_to(m, f"✅ {amount} الماس از کاربر {target} کسر شد.")
+
+
 @bot.message_handler(commands=['setdiamonds'])
 def cmd_setdiamonds(m: types.Message):
     if not is_admin(m.from_user.id):
-        return bot.reply_to(m, "اجازه ندارید.")
+        return bot.reply_to(m, "❌ شما اجازه دسترسی به این دستور را ندارید.")
+    
     parts = m.text.split()
     if len(parts) != 3:
         return bot.reply_to(m, "فرمت: /setdiamonds <user_id> <amount>")
@@ -1049,7 +1131,6 @@ def cmd_balance(m: types.Message):
 async def userbot_worker():
     @userbot.on_message()
     async def handle_user_messages(client, message: PyroMessage):
-        # اینجا کارهای یوزربات انجام میشه
         pass
 
     await userbot.start()
