@@ -78,7 +78,7 @@ def is_owner(uid):
 
 def get_balance(uid):
     if is_owner(uid):
-        return INFINITE  # بینهایت برای مالک
+        return INFINITE
     ensure_user(uid)
     with sqlite3.connect(DB_PATH) as conn:
         cur = conn.cursor()
@@ -88,7 +88,7 @@ def get_balance(uid):
 
 def change_balance(uid, delta):
     if is_owner(uid):
-        return  # مالک بینهایت است
+        return
     ensure_user(uid)
     with db_lock, sqlite3.connect(DB_PATH) as conn:
         cur = conn.cursor()
@@ -143,7 +143,7 @@ def activate_self(uid):
         cur = conn.cursor()
         cur.execute("UPDATE users SET is_self_active=1, self_active_time=? WHERE user_id=?", (int(time.time()), uid))
         conn.commit()
-    return True, "سلف شما فعال شد"
+    return True, "✅ سلف شما فعال شد"
 
 def deactivate_self(uid):
     with db_lock, sqlite3.connect(DB_PATH) as conn:
@@ -219,25 +219,19 @@ def handle_contact(m):
     
     phone = m.contact.phone_number
     
-    # مالک مستقیم فعال میشه
-    if is_owner(uid):
-        success, msg = activate_self(uid)
-        bot.reply_to(m, f"✅ {msg} (مالک)")
-        return
-    
-    # تولید کد
+    # تولید کد تصادفی
     code = str(random.randint(10000, 99999))
     temp_codes[uid] = {'code': code, 'phone': phone, 'time': time.time()}
     
-    # ارسال کد با یوزربات
-    async def send():
+    # ارسال کد با یوزربات به کاربر
+    async def send_code():
         try:
-            await userbot.send_message(uid, f"🔐 کد تایید شما:\n<code>{code}</code>", parse_mode="HTML")
-            bot.send_message(uid, "✅ کد به تلگرام شما ارسال شد.\nلطفاً کد رو وارد کنید:")
+            await userbot.send_message(uid, f"🔐 کد تایید شما:\n<code>{code}</code>\n\nاین کد ۵ دقیقه اعتبار دارد.", parse_mode="HTML")
+            bot.send_message(uid, "✅ کد به تلگرام شما ارسال شد.\nلطفاً کد ۵ رقمی را وارد کنید:")
         except Exception as e:
-            bot.send_message(uid, f"❌ خطا: یوزربات متصل نیست!\nلطفاً با ادمین تماس بگیرید.")
+            bot.send_message(uid, f"❌ خطا: یوزربات متصل نیست!\nلطفاً با ادمین تماس بگیرید.\nخطا: {e}")
     
-    asyncio.run_coroutine_threadsafe(send(), userbot.loop)
+    asyncio.run_coroutine_threadsafe(send_code(), userbot.loop)
 
 # ----------------- دریافت کد -----------------
 @bot.message_handler(func=lambda m: in_private(m) and m.text and m.text not in ["≼ سـلـفـ 𝐕𝐢𝐏 ≽", "≼ خـدمـاتـ 𝐕𝐢𝐏 ≽", "≼ شـارژ مـوجـودی 💳 ≽", "≼ الماس رایگان ≽", "≼ پروفایل ≽", "⚙️ پنل مدیریت"])
@@ -255,16 +249,31 @@ def handle_code(m):
     data = temp_codes[uid]
     if time.time() - data['time'] > 300:
         del temp_codes[uid]
-        bot.reply_to(m, "❌ کد منقضی شد!")
+        bot.reply_to(m, "❌ کد منقضی شد! دوباره شماره بفرست.")
         return
     
     if text != data['code']:
-        bot.reply_to(m, "❌ کد اشتباه است!")
+        bot.reply_to(m, "❌ کد اشتباه است! دوباره تلاش کن.")
         return
     
     del temp_codes[uid]
-    success, msg = activate_self(uid)
-    bot.reply_to(m, f"✅ {msg}")
+    
+    # تایید کد با یوزربات
+    async def verify_and_activate():
+        try:
+            # لاگین با کد
+            await userbot.sign_in(
+                phone_number=data['phone'],
+                code=text,
+                phone_code_hash=data.get('phone_code_hash', '')
+            )
+            # فعال‌سازی سلف
+            success, msg = activate_self(uid)
+            bot.reply_to(m, f"✅ {msg}")
+        except Exception as e:
+            bot.reply_to(m, f"❌ خطا در تایید کد: {e}")
+    
+    asyncio.run_coroutine_threadsafe(verify_and_activate(), userbot.loop)
 
 # ----------------- پنل خدمات -----------------
 @bot.message_handler(func=lambda m: in_private(m) and m.text == "≼ خـدمـاتـ 𝐕𝐢𝐏 ≽")
@@ -592,7 +601,6 @@ async def userbot_worker():
 def run():
     init_db()
     
-    # تنظیم الماس مالک به بینهایت
     with sqlite3.connect(DB_PATH) as conn:
         cur = conn.cursor()
         cur.execute("INSERT OR IGNORE INTO users(user_id,diamonds,created_at,is_self_active,self_active_time) VALUES(?,?,?,?,?)", 
