@@ -4,26 +4,15 @@ import threading
 import logging
 import time
 import random
-import asyncio
 from datetime import datetime
 
 import telebot
 from telebot import types
-from telethon import TelegramClient
-from telethon.errors import (
-    FloodWaitError,
-    PhoneCodeExpiredError,
-    PhoneCodeInvalidError,
-    SessionPasswordNeededError
-)
 
 # ----------------- CONFIG -----------------
 BOT_TOKEN = "8200221816:AAFVgwZ2reZzm3tDM_k0bEWHSkCTlWacxlY"
 OWNER_ID = 5552127428
 ADMIN_IDS = [5552127428]
-
-API_ID = 37386944
-API_HASH = "d64069023db75d11ae5982f653069a98"
 
 DB_PATH = "vip_bet.db"
 ACTIVATE_COST = 20
@@ -33,12 +22,6 @@ MIN_BET = 20
 bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML")
 logging.basicConfig(level=logging.INFO)
 db_lock = threading.RLock()
-
-# ============================================================
-# یوزربات با سشن
-# ============================================================
-client = TelegramClient("main_session", API_ID, API_HASH)
-auth_sessions = {}
 
 # ============================================================
 # دیتابیس
@@ -53,12 +36,7 @@ def init_db():
             created_at INTEGER,
             is_self_active INTEGER DEFAULT 0,
             self_active_time INTEGER DEFAULT 0,
-            phone TEXT,
-            font_mode TEXT DEFAULT 'font1',
-            clock_mode INTEGER DEFAULT 0,
-            text_mode TEXT DEFAULT 'normal',
-            action_mode TEXT DEFAULT 'none',
-            reply_mode INTEGER DEFAULT 0
+            phone TEXT
         );
         CREATE TABLE IF NOT EXISTS bets (
             bet_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -84,8 +62,6 @@ def ensure_user(uid):
         cur = conn.cursor()
         cur.execute("INSERT OR IGNORE INTO users(user_id,diamonds,created_at,is_self_active,self_active_time) VALUES(?,?,?,?,?)", 
                    (uid, 0, int(time.time()), 0, 0))
-        cur.execute("INSERT OR IGNORE INTO users(user_id,font_mode,clock_mode,text_mode,action_mode,reply_mode) VALUES(?,?,?,?,?,?)",
-                   (uid, 'font1', 0, 'normal', 'none', 0))
         conn.commit()
 
 def is_owner(uid):
@@ -112,29 +88,6 @@ def change_balance(uid, delta):
         cur = conn.cursor()
         cur.execute("UPDATE users SET diamonds = diamonds + ? WHERE user_id=?", (delta, uid))
         conn.commit()
-
-def set_user_phone(uid, phone):
-    with db_lock, sqlite3.connect(DB_PATH) as conn:
-        cur = conn.cursor()
-        cur.execute("UPDATE users SET phone=? WHERE user_id=?", (phone, uid))
-        conn.commit()
-
-def get_user_setting(uid, key):
-    with sqlite3.connect(DB_PATH) as conn:
-        cur = conn.cursor()
-        cur.execute(f"SELECT {key} FROM users WHERE user_id=?", (uid,))
-        r = cur.fetchone()
-        return r[0] if r else None
-
-def set_user_setting(uid, key, value):
-    with db_lock, sqlite3.connect(DB_PATH) as conn:
-        cur = conn.cursor()
-        cur.execute(f"UPDATE users SET {key}=? WHERE user_id=?", (value, uid))
-        conn.commit()
-
-# ============================================================
-# مدیریت سلف
-# ============================================================
 
 def is_self_active(uid):
     ensure_user(uid)
@@ -227,116 +180,8 @@ def cmd_self(m):
         markup.add(types.InlineKeyboardButton("🔴 غیرفعال کردن", callback_data="self:off"))
         bot.send_message(m.chat.id, "✅ سلف شما فعال است!", reply_markup=markup)
     else:
-        markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
-        btn = types.KeyboardButton("📱 ارسال شماره", request_contact=True)
-        markup.add(btn)
-        
-        bal = get_balance(uid)
-        text = f"🔐 برای فعال‌سازی سلف، شماره خود را ارسال کنید.\n\n💰 هزینه فعال‌سازی: {ACTIVATE_COST} الماس\n⏱ هزینه ساعتی: {HOURLY_COST} الماس\n💎 موجودی شما: {bal}"
-        
-        bot.send_message(m.chat.id, text, reply_markup=markup)
-
-# ----------------- دریافت شماره و کد -----------------
-
-@bot.message_handler(content_types=['contact'])
-def handle_contact(m):
-    uid = m.from_user.id
-    ensure_user(uid)
-    
-    if not m.contact or m.contact.user_id != uid:
-        bot.reply_to(m, "❌ شماره خودت رو بفرست!")
-        return
-    
-    phone = m.contact.phone_number
-    set_user_phone(uid, phone)
-    
-    bal = get_balance(uid)
-    if bal < ACTIVATE_COST:
-        bot.reply_to(m, f"❌ موجودی کافی نیست!\nشما {bal} الماس دارید، نیاز به {ACTIVATE_COST} الماس دارید.")
-        return
-    
-    bot.reply_to(m, f"✅ شماره شما ثبت شد!\n📱 {phone}\n\n📨 کد تایید به تلگرام شما ارسال شد.\nلطفاً کد ۵ رقمی را که از تلگرام دریافت کردید، وارد کنید:")
-    
-    async def send_code():
-        try:
-            await client.send_code_request(phone)
-            auth_sessions[uid] = {'phone': phone, 'step': 'waiting_code', 'start_time': time.time()}
-        except FloodWaitError as e:
-            bot.send_message(uid, f"❌ لطفاً {e.seconds} ثانیه صبر کنید.")
-        except Exception as e:
-            bot.send_message(uid, f"❌ خطا: {str(e)}")
-    
-    asyncio.run_coroutine_threadsafe(send_code(), asyncio.get_event_loop())
-
-# ----------------- دریافت کد -----------------
-
-@bot.message_handler(func=lambda m: in_private(m) and m.text and m.text not in ["≼ سـلـفـ 𝐕𝐢𝐏 ≽", "≼ خـدمـاتـ 𝐕𝐢𝐏 ≽", "≼ شـارژ مـوجـودی 💳 ≽", "≼ الماس رایگان ≽", "≼ پروفایل ≽", "⚙️ پنل مدیریت"])
-def handle_code(m):
-    uid = m.from_user.id
-    text = m.text.strip()
-    
-    if uid not in auth_sessions:
-        return
-    
-    auth = auth_sessions[uid]
-    if auth.get('step') != 'waiting_code':
-        return
-    
-    if not text.isdigit() or len(text) != 5:
-        bot.reply_to(m, "❌ کد ۵ رقمی وارد کن!")
-        return
-    
-    if time.time() - auth.get('start_time', 0) > 300:
-        del auth_sessions[uid]
-        bot.reply_to(m, "❌ زمان کد منقضی شد!")
-        return
-    
-    phone = auth['phone']
-    
-    async def verify_code():
-        try:
-            await client.sign_in(phone, text)
-            success, msg = activate_self(uid)
-            bot.reply_to(m, f"{msg}")
-            del auth_sessions[uid]
-        except PhoneCodeInvalidError:
-            bot.reply_to(m, "❌ کد اشتباه است!")
-        except PhoneCodeExpiredError:
-            bot.reply_to(m, "❌ کد منقضی شد!")
-            del auth_sessions[uid]
-        except SessionPasswordNeededError:
-            auth['step'] = 'waiting_password'
-            bot.reply_to(m, "🔐 رمز دو مرحله‌ای را وارد کنید:")
-        except Exception as e:
-            bot.reply_to(m, f"❌ خطا: {str(e)}")
-            del auth_sessions[uid]
-    
-    asyncio.run_coroutine_threadsafe(verify_code(), asyncio.get_event_loop())
-
-# ----------------- رمز دو مرحله‌ای -----------------
-
-@bot.message_handler(func=lambda m: in_private(m) and m.text and m.text not in ["≼ سـلـفـ 𝐕𝐢𝐏 ≽", "≼ خـدمـاتـ 𝐕𝐢𝐏 ≽", "≼ شـارژ مـوجـودی 💳 ≽", "≼ الماس رایگان ≽", "≼ پروفایل ≽", "⚙️ پنل مدیریت"])
-def handle_password(m):
-    uid = m.from_user.id
-    text = m.text.strip()
-    
-    if uid not in auth_sessions:
-        return
-    
-    auth = auth_sessions[uid]
-    if auth.get('step') != 'waiting_password':
-        return
-    
-    async def verify_password():
-        try:
-            await client.sign_in(password=text)
-            success, msg = activate_self(uid)
-            bot.reply_to(m, f"{msg}")
-            del auth_sessions[uid]
-        except Exception as e:
-            bot.reply_to(m, f"❌ رمز اشتباه است! {str(e)}")
-    
-    asyncio.run_coroutine_threadsafe(verify_password(), asyncio.get_event_loop())
+        text = f"🔐 برای فعال‌سازی سلف به ادمین پیام دهید.\n\n💰 هزینه فعال‌سازی: {ACTIVATE_COST} الماس\n⏱ هزینه ساعتی: {HOURLY_COST} الماس\n💎 موجودی شما: {get_balance(uid)}\n\n👤 ادمین: @AliZord_yt"
+        bot.send_message(m.chat.id, text)
 
 # ----------------- غیرفعال کردن سلف -----------------
 
@@ -349,9 +194,7 @@ def cb_self(c):
         deactivate_self(uid)
         bot.edit_message_text("❌ سلف شما غیرفعال شد", c.message.chat.id, c.message.message_id)
 
-# ============================================================
-# پنل خدمات VIP
-# ============================================================
+# ----------------- پنل خدمات -----------------
 
 @bot.message_handler(func=lambda m: in_private(m) and m.text == "≼ خـدمـاتـ 𝐕𝐢𝐏 ≽")
 def cmd_services(m):
@@ -365,14 +208,12 @@ def cmd_services(m):
         types.InlineKeyboardButton("📝 حالت متن", callback_data="svc:text"),
         types.InlineKeyboardButton("⏰ ساعت", callback_data="svc:clock"),
         types.InlineKeyboardButton("🔤 فونت", callback_data="svc:font"),
-        types.InlineKeyboardButton("🎬 اکشن", callback_data="svc:action"),
-        types.InlineKeyboardButton("🤖 منشی", callback_data="svc:reply"),
         types.InlineKeyboardButton("📊 وضعیت", callback_data="svc:status")
     )
     markup.add(types.InlineKeyboardButton("❌ بستن", callback_data="svc:close"))
     bot.send_message(m.chat.id, "🎯 پنل خدمات:", reply_markup=markup)
 
-# ----------------- کالبک خدمات (ساده شده) -----------------
+# ----------------- کالبک خدمات -----------------
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("svc:"))
 def cb_service(c):
@@ -387,79 +228,42 @@ def cb_service(c):
         return
     
     if action == "status":
-        with sqlite3.connect(DB_PATH) as conn:
-            cur = conn.cursor()
-            cur.execute("SELECT is_self_active, font_mode, clock_mode, text_mode, action_mode, reply_mode FROM users WHERE user_id=?", (uid,))
-            r = cur.fetchone()
-        if r:
-            active, font, clock, text, action_m, reply = r
-            msg = f"📊 **وضعیت سلف**\n\n"
-            msg += f"🔐 سلف: {'✅ فعال' if active else '❌ غیرفعال'}\n"
-            msg += f"📝 حالت متن: {text}\n"
-            msg += f"⏰ ساعت: {'🟢 روشن' if clock else '🔴 خاموش'}\n"
-            msg += f"🔤 فونت: {font}\n"
-            msg += f"🎬 اکشن: {action_m}\n"
-            msg += f"🤖 منشی: {'🟢 روشن' if reply else '🔴 خاموش'}"
-            bot.send_message(c.message.chat.id, msg, parse_mode="HTML")
+        active = is_self_active(uid)
+        bal = get_balance(uid)
+        text = f"📊 **وضعیت شما**\n\n💎 الماس: {bal}\n🔐 سلف: {'✅ فعال' if active else '❌ غیرفعال'}"
+        bot.send_message(c.message.chat.id, text, parse_mode="HTML")
         return
     
     if action == "text":
-        current = get_user_setting(uid, 'text_mode') or 'normal'
         markup = types.InlineKeyboardMarkup(row_width=2)
         markup.add(
-            types.InlineKeyboardButton("عادی" + (" ✅" if current == 'normal' else ""), callback_data="text:normal"),
-            types.InlineKeyboardButton("پررنگ" + (" ✅" if current == 'bold' else ""), callback_data="text:bold"),
-            types.InlineKeyboardButton("نقل قول" + (" ✅" if current == 'quote' else ""), callback_data="text:quote"),
-            types.InlineKeyboardButton("اسپویلر" + (" ✅" if current == 'spoiler' else ""), callback_data="text:spoiler")
+            types.InlineKeyboardButton("🟢 عادی", callback_data="text:normal"),
+            types.InlineKeyboardButton("🔵 پررنگ", callback_data="text:bold"),
+            types.InlineKeyboardButton("🟡 نقل قول", callback_data="text:quote"),
+            types.InlineKeyboardButton("🟣 اسپویلر", callback_data="text:spoiler")
         )
         markup.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data="svc:back"))
         bot.edit_message_text("📝 **حالت متن**", c.message.chat.id, c.message.message_id, reply_markup=markup, parse_mode="HTML")
         return
     
     if action == "clock":
-        current = get_user_setting(uid, 'clock_mode') or 0
         markup = types.InlineKeyboardMarkup()
         markup.add(
-            types.InlineKeyboardButton("روشن" + (" ✅" if current == 1 else ""), callback_data="clock:1"),
-            types.InlineKeyboardButton("خاموش" + (" ✅" if current == 0 else ""), callback_data="clock:0")
+            types.InlineKeyboardButton("🟢 روشن", callback_data="clock:on"),
+            types.InlineKeyboardButton("🔴 خاموش", callback_data="clock:off")
         )
         markup.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data="svc:back"))
         bot.edit_message_text("⏰ **ساعت**", c.message.chat.id, c.message.message_id, reply_markup=markup, parse_mode="HTML")
         return
     
     if action == "font":
-        current = get_user_setting(uid, 'font_mode') or 'font1'
         markup = types.InlineKeyboardMarkup(row_width=2)
         markup.add(
-            types.InlineKeyboardButton("فونت ۱" + (" ✅" if current == 'font1' else ""), callback_data="font:font1"),
-            types.InlineKeyboardButton("فونت ۲" + (" ✅" if current == 'font2' else ""), callback_data="font:font2")
+            types.InlineKeyboardButton("🔵 فونت ۱", callback_data="font:font1"),
+            types.InlineKeyboardButton("🟣 فونت ۲", callback_data="font:font2")
         )
         markup.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data="svc:back"))
         bot.edit_message_text("🔤 **فونت**", c.message.chat.id, c.message.message_id, reply_markup=markup, parse_mode="HTML")
-        return
-    
-    if action == "action":
-        current = get_user_setting(uid, 'action_mode') or 'none'
-        markup = types.InlineKeyboardMarkup(row_width=2)
-        markup.add(
-            types.InlineKeyboardButton("خاموش" + (" ✅" if current == 'none' else ""), callback_data="action:none"),
-            types.InlineKeyboardButton("ویس" + (" ✅" if current == 'voice' else ""), callback_data="action:voice"),
-            types.InlineKeyboardButton("بازی" + (" ✅" if current == 'game' else ""), callback_data="action:game"),
-            types.InlineKeyboardButton("استیکر" + (" ✅" if current == 'sticker' else ""), callback_data="action:sticker")
-        )
-        markup.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data="svc:back"))
-        bot.edit_message_text("🎬 **اکشن**", c.message.chat.id, c.message.message_id, reply_markup=markup, parse_mode="HTML")
-        return
-    
-    if action == "reply":
-        current = get_user_setting(uid, 'reply_mode') or 0
-        markup = types.InlineKeyboardMarkup()
-        markup.add(
-            types.InlineKeyboardButton("روشن" + (" ✅" if current == 1 else ""), callback_data="reply:1"),
-            types.InlineKeyboardButton("خاموش" + (" ✅" if current == 0 else ""), callback_data="reply:0")
-        )
-        markup.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data="svc:back"))
-        bot.edit_message_text("🤖 **منشی**", c.message.chat.id, c.message.message_id, reply_markup=markup, parse_mode="HTML")
         return
     
     if action == "back":
@@ -471,50 +275,24 @@ def cb_service(c):
 def cb_text(c):
     try: bot.answer_callback_query(c.id)
     except: pass
-    uid = c.from_user.id
     mode = c.data.split(":")[1]
-    set_user_setting(uid, 'text_mode', mode)
-    bot.edit_message_text(f"✅ حالت متن به «{mode}» تغییر کرد", c.message.chat.id, c.message.message_id)
+    bot.edit_message_text(f"✅ حالت متن به {mode} تغییر کرد", c.message.chat.id, c.message.message_id)
     cmd_services(c.message)
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("clock:"))
 def cb_clock(c):
     try: bot.answer_callback_query(c.id)
     except: pass
-    uid = c.from_user.id
-    val = int(c.data.split(":")[1])
-    set_user_setting(uid, 'clock_mode', val)
-    bot.edit_message_text(f"✅ ساعت {'روشن' if val else 'خاموش'} شد", c.message.chat.id, c.message.message_id)
+    val = c.data.split(":")[1]
+    bot.edit_message_text(f"✅ ساعت {val} شد", c.message.chat.id, c.message.message_id)
     cmd_services(c.message)
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("font:"))
 def cb_font(c):
     try: bot.answer_callback_query(c.id)
     except: pass
-    uid = c.from_user.id
     font = c.data.split(":")[1]
-    set_user_setting(uid, 'font_mode', font)
-    bot.edit_message_text(f"✅ فونت به {font} تغییر کرد", c.message.chat.id, c.message.message_id)
-    cmd_services(c.message)
-
-@bot.callback_query_handler(func=lambda c: c.data.startswith("action:"))
-def cb_action(c):
-    try: bot.answer_callback_query(c.id)
-    except: pass
-    uid = c.from_user.id
-    mode = c.data.split(":")[1]
-    set_user_setting(uid, 'action_mode', mode)
-    bot.edit_message_text(f"✅ اکشن به {mode} تغییر کرد", c.message.chat.id, c.message.message_id)
-    cmd_services(c.message)
-
-@bot.callback_query_handler(func=lambda c: c.data.startswith("reply:"))
-def cb_reply(c):
-    try: bot.answer_callback_query(c.id)
-    except: pass
-    uid = c.from_user.id
-    val = int(c.data.split(":")[1])
-    set_user_setting(uid, 'reply_mode', val)
-    bot.edit_message_text(f"✅ منشی {'روشن' if val else 'خاموش'} شد", c.message.chat.id, c.message.message_id)
+    bot.edit_message_text(f"✅ فونت {font} انتخاب شد", c.message.chat.id, c.message.message_id)
     cmd_services(c.message)
 
 # ============================================================
@@ -661,12 +439,11 @@ def cb_bet(c):
         bot.answer_callback_query(c.id, "✅ انجام شد!")
 
 # ============================================================
-# ✅ انتقال الماس (همه جا - با ریپلای، آیدی، یوزرنیم)
+# ✅ انتقال الماس
 # ============================================================
 
 @bot.message_handler(func=lambda m: m.text and m.text.startswith("انتقال"))
 def transfer_diamonds(m):
-    # فقط در پیوی یا گروه اجرا بشه
     if m.chat.type not in ["private", "group", "supergroup"]:
         return
     
@@ -684,10 +461,8 @@ def transfer_diamonds(m):
         bot.reply_to(m, "❌ مقدار باید عدد مثبت باشد!")
         return
     
-    # دریافت گیرنده
     receiver_id = None
     
-    # اول ریپلای
     if m.reply_to_message:
         receiver_id = m.reply_to_message.from_user.id
     elif len(parts) >= 3:
@@ -714,10 +489,8 @@ def transfer_diamonds(m):
         bot.reply_to(m, "❌ نمی‌تونی به خودت انتقال بدی!")
         return
     
-    # بررسی موجودی کاربر مقصد
     ensure_user(receiver_id)
     
-    # مالیات ۵٪
     tax = int(amount * 0.05)
     total = amount + tax
     
@@ -726,7 +499,6 @@ def transfer_diamonds(m):
         bot.reply_to(m, f"❌ موجودی کافی نیست!\nنیاز: {total} الماس (شامل مالیات {tax})")
         return
     
-    # انجام انتقال
     if is_owner(sender_id):
         change_balance(receiver_id, amount)
         bot.reply_to(m, f"✅ {amount} الماس (مالک) به کاربر منتقل شد!")
@@ -735,7 +507,6 @@ def transfer_diamonds(m):
         change_balance(receiver_id, amount)
         bot.reply_to(m, f"✅ {amount} الماس منتقل شد!\n🧾 مالیات: {tax} الماس")
     
-    # اطلاع‌رسانی به گیرنده (اگه پیوی باشه)
     try:
         sender_name = m.from_user.first_name or "کاربر"
         bot.send_message(receiver_id, f"🎁 شما {amount} الماس از {sender_name} دریافت کردید!")
@@ -785,8 +556,7 @@ def admin_panel(m):
         types.InlineKeyboardButton("📊 آمار ربات", callback_data="admin:stats"),
         types.InlineKeyboardButton("➕ افزودن الماس", callback_data="admin:give"),
         types.InlineKeyboardButton("➖ کم کردن الماس", callback_data="admin:remove"),
-        types.InlineKeyboardButton("💰 تنظیم الماس", callback_data="admin:set"),
-        types.InlineKeyboardButton("📢 ارسال همگانی", callback_data="admin:broadcast")
+        types.InlineKeyboardButton("💰 تنظیم الماس", callback_data="admin:set")
     )
     markup.add(types.InlineKeyboardButton("🔴 بستن پنل", callback_data="admin:close"))
     
@@ -862,10 +632,6 @@ def cb_admin(c):
     if action == "set":
         bot.send_message(c.from_user.id, "📝 /setdiamonds <user_id> <amount>")
         return
-    
-    if action == "broadcast":
-        bot.send_message(c.from_user.id, "📝 /broadcast <پیام>")
-        return
 
 # ----------------- دستورات مدیریت -----------------
 
@@ -930,44 +696,11 @@ def set_diamonds(m):
     except:
         bot.reply_to(m, "❌ فرمت: /setdiamonds <user_id> <amount>")
 
-@bot.message_handler(commands=['broadcast'])
-def broadcast(m):
-    if not is_admin(m.from_user.id):
-        return
-    
-    message = m.text.replace('/broadcast', '').strip()
-    if not message:
-        bot.reply_to(m, "❌ لطفاً پیام رو وارد کن!")
-        return
-    
-    bot.reply_to(m, "🔄 در حال ارسال...")
-    
-    with sqlite3.connect(DB_PATH) as conn:
-        cur = conn.cursor()
-        cur.execute("SELECT user_id FROM users")
-        users = cur.fetchall()
-    
-    success = 0
-    fail = 0
-    
-    for user in users:
-        try:
-            bot.send_message(user[0], f"📢 **پیام همگانی:**\n\n{message}", parse_mode="HTML")
-            success += 1
-            time.sleep(0.05)
-        except:
-            fail += 1
-    
-    bot.reply_to(m, f"✅ ارسال شد!\n✓ موفق: {success}\n✗ ناموفق: {fail}")
-
 # ============================================================
 # اجرا
 # ============================================================
 
-async def main():
-    await client.start()
-    print("✅ یوزربات با سشن لاگین شد!")
-    
+def run():
     init_db()
     
     with sqlite3.connect(DB_PATH) as conn:
@@ -983,4 +716,4 @@ async def main():
     bot.infinity_polling()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    run()
