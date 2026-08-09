@@ -4,15 +4,26 @@ import threading
 import logging
 import time
 import random
+import asyncio
 from datetime import datetime
 
 import telebot
 from telebot import types
+from telethon import TelegramClient
+from telethon.errors import (
+    FloodWaitError,
+    PhoneCodeExpiredError,
+    PhoneCodeInvalidError,
+    SessionPasswordNeededError
+)
 
 # ----------------- CONFIG -----------------
 BOT_TOKEN = "8200221816:AAFVgwZ2reZzm3tDM_k0bEWHSkCTlWacxlY"
 OWNER_ID = 5552127428
 ADMIN_IDS = [5552127428]
+
+API_ID = 37386944
+API_HASH = "d64069023db75d11ae5982f653069a98"
 
 DB_PATH = "vip_bet.db"
 ACTIVATE_COST = 20
@@ -22,6 +33,12 @@ MIN_BET = 20
 bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML")
 logging.basicConfig(level=logging.INFO)
 db_lock = threading.RLock()
+
+# ============================================================
+# یوزربات با سشن
+# ============================================================
+client = TelegramClient("main_session", API_ID, API_HASH)
+auth_sessions = {}
 
 # ============================================================
 # دیتابیس
@@ -89,6 +106,12 @@ def change_balance(uid, delta):
         cur.execute("UPDATE users SET diamonds = diamonds + ? WHERE user_id=?", (delta, uid))
         conn.commit()
 
+def set_user_phone(uid, phone):
+    with db_lock, sqlite3.connect(DB_PATH) as conn:
+        cur = conn.cursor()
+        cur.execute("UPDATE users SET phone=? WHERE user_id=?", (phone, uid))
+        conn.commit()
+
 def is_self_active(uid):
     ensure_user(uid)
     with sqlite3.connect(DB_PATH) as conn:
@@ -144,6 +167,15 @@ def deactivate_self(uid):
         cur.execute("UPDATE users SET is_self_active=0, self_active_time=0 WHERE user_id=?", (uid,))
         conn.commit()
 
+def get_user_display(uid):
+    try:
+        user = bot.get_chat(uid)
+        if user.username:
+            return f"@{user.username}"
+        return user.first_name or str(uid)
+    except:
+        return str(uid)
+
 # ============================================================
 # ربات
 # ============================================================
@@ -168,7 +200,21 @@ def start(m):
     
     bot.send_message(m.chat.id, "🌟 به ربات VIP خوش آمدید!", reply_markup=markup)
 
-# ----------------- سلف VIP -----------------
+# ----------------- موجودی (گروه) -----------------
+
+@bot.message_handler(func=lambda m: in_group(m) and m.text and m.text.strip() == "موجودی")
+def group_balance(m):
+    uid = m.from_user.id
+    bal = get_balance(uid)
+    
+    if is_owner(uid):
+        text = f"💎 موجودی شما:\nالماس 💎: ∞\nبه تومان: ∞"
+    else:
+        text = f"💎 موجودی شما:\nالماس 💎: {bal}\nبه تومان: {bal * 40:,}"
+    
+    bot.reply_to(m, text)
+
+# ----------------- سلف VIP (با کد از تلگرام) -----------------
 
 @bot.message_handler(func=lambda m: in_private(m) and m.text == "≼ سـلـفـ 𝐕𝐢𝐏 ≽")
 def cmd_self(m):
@@ -177,11 +223,119 @@ def cmd_self(m):
     
     if is_self_active(uid):
         markup = types.InlineKeyboardMarkup()
-        markup.add(types.InlineKeyboardButton("🔴 غیرفعال کردن", callback_data="self:off"))
+        markup.add(types.InlineKeyboardButton("❌ غیرفعال کردن", callback_data="self:off"))
         bot.send_message(m.chat.id, "✅ سلف شما فعال است!", reply_markup=markup)
     else:
-        text = f"🔐 برای فعال‌سازی سلف به ادمین پیام دهید.\n\n💰 هزینه فعال‌سازی: {ACTIVATE_COST} الماس\n⏱ هزینه ساعتی: {HOURLY_COST} الماس\n💎 موجودی شما: {get_balance(uid)}\n\n👤 ادمین: @AliZord_yt"
-        bot.send_message(m.chat.id, text)
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+        btn = types.KeyboardButton("📱 ارسال شماره", request_contact=True)
+        markup.add(btn)
+        
+        bal = get_balance(uid)
+        text = f"🔐 برای فعال‌سازی سلف، شماره خود را ارسال کنید.\n\n💰 هزینه فعال‌سازی: {ACTIVATE_COST} الماس\n⏱ هزینه ساعتی: {HOURLY_COST} الماس\n💎 موجودی شما: {bal}"
+        
+        bot.send_message(m.chat.id, text, reply_markup=markup)
+
+# ----------------- دریافت شماره و کد -----------------
+
+@bot.message_handler(content_types=['contact'])
+def handle_contact(m):
+    uid = m.from_user.id
+    ensure_user(uid)
+    
+    if not m.contact or m.contact.user_id != uid:
+        bot.reply_to(m, "❌ شماره خودت رو بفرست!")
+        return
+    
+    phone = m.contact.phone_number
+    set_user_phone(uid, phone)
+    
+    bal = get_balance(uid)
+    if bal < ACTIVATE_COST:
+        bot.reply_to(m, f"❌ موجودی کافی نیست!\nشما {bal} الماس دارید، نیاز به {ACTIVATE_COST} الماس دارید.")
+        return
+    
+    bot.reply_to(m, f"✅ شماره شما ثبت شد!\n📱 {phone}\n\n📨 کد تایید به تلگرام شما ارسال شد.\nلطفاً کد ۵ رقمی را که از تلگرام دریافت کردید، وارد کنید:")
+    
+    async def send_code():
+        try:
+            await client.send_code_request(phone)
+            auth_sessions[uid] = {'phone': phone, 'step': 'waiting_code', 'start_time': time.time()}
+        except FloodWaitError as e:
+            bot.send_message(uid, f"❌ لطفاً {e.seconds} ثانیه صبر کنید.")
+        except Exception as e:
+            bot.send_message(uid, f"❌ خطا: {str(e)}")
+    
+    asyncio.run_coroutine_threadsafe(send_code(), asyncio.get_event_loop())
+
+# ----------------- دریافت کد -----------------
+
+@bot.message_handler(func=lambda m: in_private(m) and m.text and m.text not in ["≼ سـلـفـ 𝐕𝐢𝐏 ≽", "≼ خـدمـاتـ 𝐕𝐢𝐏 ≽", "≼ شـارژ مـوجـودی 💳 ≽", "≼ الماس رایگان ≽", "≼ پروفایل ≽", "⚙️ پنل مدیریت"])
+def handle_code(m):
+    uid = m.from_user.id
+    text = m.text.strip()
+    
+    if uid not in auth_sessions:
+        return
+    
+    auth = auth_sessions[uid]
+    if auth.get('step') != 'waiting_code':
+        return
+    
+    if not text.isdigit() or len(text) != 5:
+        bot.reply_to(m, "❌ کد ۵ رقمی وارد کن!")
+        return
+    
+    if time.time() - auth.get('start_time', 0) > 300:
+        del auth_sessions[uid]
+        bot.reply_to(m, "❌ زمان کد منقضی شد!")
+        return
+    
+    phone = auth['phone']
+    
+    async def verify_code():
+        try:
+            await client.sign_in(phone, text)
+            success, msg = activate_self(uid)
+            bot.reply_to(m, f"{msg}")
+            del auth_sessions[uid]
+        except PhoneCodeInvalidError:
+            bot.reply_to(m, "❌ کد اشتباه است!")
+        except PhoneCodeExpiredError:
+            bot.reply_to(m, "❌ کد منقضی شد!")
+            del auth_sessions[uid]
+        except SessionPasswordNeededError:
+            auth['step'] = 'waiting_password'
+            bot.reply_to(m, "🔐 رمز دو مرحله‌ای را وارد کنید:")
+        except Exception as e:
+            bot.reply_to(m, f"❌ خطا: {str(e)}")
+            del auth_sessions[uid]
+    
+    asyncio.run_coroutine_threadsafe(verify_code(), asyncio.get_event_loop())
+
+# ----------------- رمز دو مرحله‌ای -----------------
+
+@bot.message_handler(func=lambda m: in_private(m) and m.text and m.text not in ["≼ سـلـفـ 𝐕𝐢𝐏 ≽", "≼ خـدمـاتـ 𝐕𝐢𝐏 ≽", "≼ شـارژ مـوجـودی 💳 ≽", "≼ الماس رایگان ≽", "≼ پروفایل ≽", "⚙️ پنل مدیریت"])
+def handle_password(m):
+    uid = m.from_user.id
+    text = m.text.strip()
+    
+    if uid not in auth_sessions:
+        return
+    
+    auth = auth_sessions[uid]
+    if auth.get('step') != 'waiting_password':
+        return
+    
+    async def verify_password():
+        try:
+            await client.sign_in(password=text)
+            success, msg = activate_self(uid)
+            bot.reply_to(m, f"{msg}")
+            del auth_sessions[uid]
+        except Exception as e:
+            bot.reply_to(m, f"❌ رمز اشتباه است! {str(e)}")
+    
+    asyncio.run_coroutine_threadsafe(verify_password(), asyncio.get_event_loop())
 
 # ----------------- غیرفعال کردن سلف -----------------
 
@@ -296,7 +450,7 @@ def cb_font(c):
     cmd_services(c.message)
 
 # ============================================================
-# شرط‌بندی (گروه)
+# ✅ شرط‌بندی با فرمت VIP
 # ============================================================
 
 @bot.message_handler(func=lambda m: in_group(m) and m.text and m.text.startswith("شرطبندی"))
@@ -326,18 +480,21 @@ def cmd_bet(m):
         bet_id = cur.lastrowid
         conn.commit()
     
+    creator_name = get_user_display(uid)
+    
+    text = f"◈ ━━━━ 𝐕𝐈𝐏 ━━━━━ ◈\n"
+    text += f"شرطبندی باز شد:\n"
+    text += f"💎 الماس: {amount}\n"
+    text += f"👤 سازنده: {creator_name}\n"
+    text += f"◈ ━━━━ 𝐕𝐈𝐏 ━━━━━ ◈"
+    
     markup = types.InlineKeyboardMarkup()
     markup.add(
         types.InlineKeyboardButton("❌ لغو", callback_data=f"bet:cancel:{bet_id}"),
         types.InlineKeyboardButton("✅ پیوستن", callback_data=f"bet:join:{bet_id}")
     )
     
-    msg = bot.send_message(
-        m.chat.id,
-        f"🎯 **شرط‌بندی جدید**\n\n💎 مبلغ: {amount}\n👤 سازنده: {m.from_user.first_name}",
-        reply_markup=markup,
-        parse_mode="HTML"
-    )
+    msg = bot.send_message(m.chat.id, text, reply_markup=markup, parse_mode="HTML")
     
     with db_lock, sqlite3.connect(DB_PATH) as conn:
         cur = conn.cursor()
@@ -415,31 +572,22 @@ def cb_bet(c):
             cur.execute("UPDATE bets SET state='closed', player_joined_id=? WHERE bet_id=?", (uid, bet_id))
             conn.commit()
         
-        try:
-            winner = bot.get_chat(winner_id)
-            winner_name = winner.first_name or str(winner_id)
-        except:
-            winner_name = str(winner_id)
+        winner_name = get_user_display(winner_id)
+        loser_name = get_user_display(loser_id)
         
-        try:
-            loser = bot.get_chat(loser_id)
-            loser_name = loser.first_name or str(loser_id)
-        except:
-            loser_name = str(loser_id)
+        text = f"◈━━━━━━ 𝐕𝐈𝐏 ━━━━━━ ◈\n"
+        text += f"نتیجه شرطبندی:\n"
+        text += f"🏆 برنده: {winner_name}\n"
+        text += f"💀 بازنده: {loser_name}\n"
+        text += f"💎 جایزه: {prize}\n"
+        text += f"🧾 مالیات: {tax}\n"
+        text += f"◈━━━━━━ 𝐕𝐈𝐏 ━━━━━━ ◈"
         
-        bot.edit_message_text(
-            f"🏆 **نتیجه شرط‌بندی**\n\n"
-            f"🥇 برنده: {winner_name}\n"
-            f"💀 بازنده: {loser_name}\n"
-            f"💎 جایزه: {prize} الماس\n"
-            f"🧾 مالیات: {tax} الماس",
-            chat_id, message_id,
-            parse_mode="HTML"
-        )
+        bot.edit_message_text(text, chat_id, message_id, parse_mode="HTML")
         bot.answer_callback_query(c.id, "✅ انجام شد!")
 
 # ============================================================
-# ✅ انتقال الماس
+# ✅ انتقال الماس با فرمت VIP
 # ============================================================
 
 @bot.message_handler(func=lambda m: m.text and m.text.startswith("انتقال"))
@@ -499,16 +647,34 @@ def transfer_diamonds(m):
         bot.reply_to(m, f"❌ موجودی کافی نیست!\nنیاز: {total} الماس (شامل مالیات {tax})")
         return
     
+    sender_name = get_user_display(sender_id)
+    receiver_name = get_user_display(receiver_id)
+    
     if is_owner(sender_id):
         change_balance(receiver_id, amount)
-        bot.reply_to(m, f"✅ {amount} الماس (مالک) به کاربر منتقل شد!")
+        text = f"◈ ━━━━ 𝐕𝐈𝐏 ━━━━━ ◈\n"
+        text += f"💎 رسید انتقال الماس\n"
+        text += f"👤 فرستنده: {sender_name} (مالک)\n"
+        text += f"👥 گیرنده: {receiver_name}\n"
+        text += f"💵 مبلغ ارسال: {amount}\n"
+        text += f"🧾 مالیات از فرستنده: 0\n"
+        text += f"✅ مبلغ دریافتی گیرنده: {amount}\n"
+        text += f"◈ ━━━━ 𝐕𝐈𝐏 ━━━━━ ◈"
+        bot.reply_to(m, text, parse_mode="HTML")
     else:
         change_balance(sender_id, -total)
         change_balance(receiver_id, amount)
-        bot.reply_to(m, f"✅ {amount} الماس منتقل شد!\n🧾 مالیات: {tax} الماس")
+        text = f"◈ ━━━━ 𝐕𝐈𝐏 ━━━━━ ◈\n"
+        text += f"💎 رسید انتقال الماس\n"
+        text += f"👤 فرستنده: {sender_name}\n"
+        text += f"👥 گیرنده: {receiver_name}\n"
+        text += f"💵 مبلغ ارسال: {amount}\n"
+        text += f"🧾 مالیات از فرستنده: {tax}\n"
+        text += f"✅ مبلغ دریافتی گیرنده: {amount}\n"
+        text += f"◈ ━━━━ 𝐕𝐈𝐏 ━━━━━ ◈"
+        bot.reply_to(m, text, parse_mode="HTML")
     
     try:
-        sender_name = m.from_user.first_name or "کاربر"
         bot.send_message(receiver_id, f"🎁 شما {amount} الماس از {sender_name} دریافت کردید!")
     except:
         pass
@@ -700,7 +866,13 @@ def set_diamonds(m):
 # اجرا
 # ============================================================
 
-def run():
+async def main():
+    try:
+        await client.start()
+        print("✅ یوزربات با سشن لاگین شد!")
+    except Exception as e:
+        print(f"❌ یوزربات لاگین نشد: {e}")
+    
     init_db()
     
     with sqlite3.connect(DB_PATH) as conn:
@@ -716,4 +888,4 @@ def run():
     bot.infinity_polling()
 
 if __name__ == "__main__":
-    run()
+    asyncio.run(main())
