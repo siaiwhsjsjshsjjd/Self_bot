@@ -78,7 +78,7 @@ API_ID = 37386944
 API_HASH = "d64069023db75d11ae5982f653069a98"
 BOT_TOKEN = "8200221816:AAFVgwZ2reZzm3tDM_k0bEWHSkCTlWacxlY"
 
-ROOT_ADMIN = 552127428
+ROOT_ADMIN = 5552127428
 DATA_FILE = "bot_data_finalxxx.json"
 # ------------------------------------------------
 
