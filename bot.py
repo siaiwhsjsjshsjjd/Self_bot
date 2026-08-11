@@ -79,11 +79,13 @@ API_HASH = "d64069023db75d11ae5982f653069a98"
 BOT_TOKEN = "8200221816:AAFVgwZ2reZzm3tDM_k0bEWHSkCTlWacxlY"
 
 ROOT_ADMIN = 5552127428
+SECOND_ADMIN = 8915571405
 DATA_FILE = "bot_data_finalxxx.json"
-
-DIAMOND_COST = 20
-HOURLY_COST = 2
-REFERRAL_BONUS = 100
+ACTIVATION_COST = 20
+HOURLY_DIAMOND_COST = 2
+REFERRAL_DIAMOND_REWARD = 100
+GAME_TAX_RATE = 0.05
+UNLIMITED_DIAMOND_ADMINS = {ROOT_ADMIN, SECOND_ADMIN}
 # ------------------------------------------------
 
 TEHRAN_TIMEZONE = ZoneInfo("Asia/Tehran")
@@ -198,15 +200,23 @@ class DataManager:
     
     def _ensure_structure(self, data):
         if "settings" not in data:
-            data["settings"] = {"ref_target": 0, "ref_days": 0, "forced_channels": []}
+            data["settings"] = {"forced_channels": []}
+        data.setdefault("admins", [])
+        for adm in (ROOT_ADMIN, SECOND_ADMIN):
+            if adm not in data["admins"]:
+                data["admins"].append(adm)
         for u in data.get("users", {}).values():
             if "referrals" not in u: u["referrals"] = []
+            if "diamonds" not in u: u["diamonds"] = 0
+            if "self_active" not in u: u["self_active"] = False
+            if "self_started_at" not in u: u["self_started_at"] = 0
+            if "last_hour_charge" not in u: u["last_hour_charge"] = 0
     
     def get_default_data(self):
         return {
             "users": {}, "sessions": {}, "licenses": {}, "subscriptions": {}, 
-            "admins": [ROOT_ADMIN],
-            "settings": {"ref_target": 0, "ref_days": 0, "forced_channels": []}
+            "admins": [ROOT_ADMIN, SECOND_ADMIN],
+            "settings": {"forced_channels": []}
         }
     
     def save_data(self):
@@ -277,7 +287,7 @@ class DataManager:
         if user_id_str not in self.data["users"]:
             self.data["users"][user_id_str] = {
                 "user_id": user_id, "phone": "", "session_string": "",
-                "referrals": [], "diamonds": 0,
+                "referrals": [], "diamonds": 0, "self_active": False, "self_started_at": 0, "last_hour_charge": 0,
                 "settings": {
                     "font": "stylized", "clock": False, "clock_manual": False, "bold": False, "secretary": False, "anti_report": True,
                     "auto_seen": False, "pv_lock": False, "anti_login": False,
@@ -307,12 +317,46 @@ class DataManager:
         return user_data
 
     def add_referral(self, referrer_id, new_user_id):
+        if int(referrer_id) == int(new_user_id): return False
         referrer_data = self.get_user_data(referrer_id)
         if new_user_id not in referrer_data.get("referrals", []):
             referrer_data["referrals"].append(new_user_id)
+            if int(referrer_id) not in UNLIMITED_DIAMOND_ADMINS:
+                referrer_data["diamonds"] = int(referrer_data.get("diamonds", 0)) + REFERRAL_DIAMOND_REWARD
             self.save_data()
             return True
         return False
+
+    def is_unlimited(self, user_id):
+        return int(user_id) in UNLIMITED_DIAMOND_ADMINS
+
+    def get_diamonds(self, user_id):
+        if self.is_unlimited(user_id): return None
+        return int(self.get_user_data(user_id).get("diamonds", 0))
+
+    def add_diamonds(self, user_id, amount):
+        if self.is_unlimited(user_id): return True
+        u = self.get_user_data(user_id)
+        u["diamonds"] = max(0, int(u.get("diamonds", 0)) + int(amount))
+        self.save_data()
+        return True
+
+    def spend_diamonds(self, user_id, amount):
+        if self.is_unlimited(user_id): return True
+        u = self.get_user_data(user_id)
+        if int(u.get("diamonds", 0)) < int(amount): return False
+        u["diamonds"] -= int(amount)
+        self.save_data()
+        return True
+
+    def set_self_active(self, user_id, active=True):
+        u = self.get_user_data(user_id)
+        u["self_active"] = bool(active)
+        if active:
+            now = time.time(); u["self_started_at"] = now; u["last_hour_charge"] = now
+        else:
+            u["self_started_at"] = 0; u["last_hour_charge"] = 0
+        self.save_data()
 
     def clear_referrals(self, user_id):
         user_data = self.get_user_data(user_id)
@@ -377,9 +421,7 @@ class DataManager:
         return True, "✅ اشتراک شما فعال شد.\nلطفاً دکمه '🔑 فعال‌سازی سلف' را بزنید."
 
     def check_subscription(self, user_id):
-        if int(user_id) in self.get_admins(): return True
-        sub = self.data.get("subscriptions", {}).get(str(user_id))
-        return sub and time.time() < sub["expiry_time"]
+        return bool(self.get_user_data(user_id).get("self_active")) or int(user_id) in self.get_admins()
 
 data_manager = DataManager(DATA_FILE)
 
@@ -400,9 +442,6 @@ ENEMY_ACTIVE, FRIEND_ACTIVE, CRASH_ACTIVE = {}, {}, {}
 
 MUTED_USERS, AUTO_REACTION_TARGETS, USERS_REPLIED_IN_SECRETARY = {}, {}, {}
 SECRETARY_LAST_REPLY = {}
-
-DIAMOND_BALANCES = {}
-ACTIVE_GAMES = {}
 
 manager_bot = Client("manager_bot_final", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
@@ -450,8 +489,6 @@ def load_all_states():
             MUTED_USERS[uid] = set(tuple(item) for item in data.get("muted", []))
             AUTO_REACTION_TARGETS[uid] = data.get("reactions", {})
             USERS_REPLIED_IN_SECRETARY[uid] = set(data.get("replied_users", []))
-            
-            DIAMOND_BALANCES[uid] = data.get("diamonds", 0)
         except Exception as e: logging.error(f"Error loading state {uid_str}: {e}")
 
 load_all_states()
@@ -574,8 +611,7 @@ def _cleanup_user_caches(uid):
               COPY_MODE_STATUS, AUTO_TRANSLATE_TARGET, AUTO_SAVE_VIEW_ONCE, CUSTOM_SECRETARY_MESSAGES,
               PV_PHOTO_LOCK, PV_VIDEO_LOCK, PV_GIF_LOCK, PV_VOICE_LOCK, PV_MUSIC_LOCK, PV_STICKER_LOCK, PV_DOC_LOCK,
               ENEMY_LIST, FRIEND_LIST, CRASH_LIST, ENEMY_REPLIES, FRIEND_REPLIES, CRASH_REPLIES,
-              ENEMY_ACTIVE, FRIEND_ACTIVE, CRASH_ACTIVE, MUTED_USERS, AUTO_REACTION_TARGETS, USERS_REPLIED_IN_SECRETARY,
-              DIAMOND_BALANCES):
+              ENEMY_ACTIVE, FRIEND_ACTIVE, CRASH_ACTIVE, MUTED_USERS, AUTO_REACTION_TARGETS, USERS_REPLIED_IN_SECRETARY):
         try: d.pop(int(uid), None)
         except Exception: pass
     try: RECENT_CHATS.pop(int(uid), None)
@@ -653,21 +689,28 @@ async def status_action_task(client: Client, user_id: int):
         except asyncio.CancelledError: break
         except Exception: await asyncio.sleep(60)
 
-async def subscription_monitor_task():
+async def diamond_monitor_task():
     while True:
         try:
-            for uid_str in list(data_manager.data.get("subscriptions", {}).keys()):
+            now = time.time()
+            for uid_str, u in list(data_manager.data.get("users", {}).items()):
                 uid = int(uid_str)
-                if uid in data_manager.get_admins(): continue
-                if not data_manager.check_subscription(uid):
-                    # بررسی الماس قبل از خاموش کردن
-                    if uid in ACTIVE_BOTS:
-                        await stop_user_bot(uid)
-                        try: await manager_bot.send_message(uid, "❌ اشتراک شما پایان یافت و سلف شما خاموش شد.")
-                        except: pass
-                    data_manager.delete_user_full(uid)
-            await asyncio.sleep(60)
-        except Exception: await asyncio.sleep(60)
+                if uid in UNLIMITED_DIAMOND_ADMINS or not u.get("self_active"): continue
+                last = float(u.get("last_hour_charge") or u.get("self_started_at") or now)
+                hours = int((now-last)//3600)
+                if hours <= 0: continue
+                cost = hours * HOURLY_DIAMOND_COST
+                if int(u.get("diamonds",0)) >= cost:
+                    u["diamonds"] -= cost; u["last_hour_charge"] = last + hours*3600; data_manager.save_data()
+                else:
+                    await stop_user_bot(uid)
+                    u["self_active"] = False; u["self_started_at"] = 0; u["last_hour_charge"] = 0
+                    data_manager.save_data()
+                    try: await manager_bot.send_message(uid, "❌ الماس شما تمام شد و سلف به صورت خودکار خاموش شد.")
+                    except: pass
+            await asyncio.sleep(30)
+        except Exception as e:
+            logging.warning(f"Diamond monitor error: {e}"); await asyncio.sleep(30)
 
 async def auto_seen_handler(client, message):
     uid = client.me.id
@@ -679,7 +722,7 @@ async def auto_seen_handler(client, message):
 
 async def outgoing_message_modifier(client, message):
     uid = client.me.id
-    if not message.text or message.text.startswith("/") or re.match(r"^(fun|فان|heart|قلب|typing|تایپ|progress|پروگرس|wave|موج|pulse|ضربان|emptyheart|قلب خالی|ping|پینگ|پنل|راهنما|تنظیم متن منشی|بازی|انتقال|موجودی)", message.text, re.I): return
+    if not message.text or message.text.startswith("/") or re.match(r"^(fun|فان|heart|قلب|typing|تایپ|progress|پروگرس|wave|موج|pulse|ضربان|emptyheart|قلب خالی|ping|پینگ|پنل|راهنما|تنظیم متن منشی)", message.text, re.I): return
     orig = message.text
     mod = orig
     if t_lang := AUTO_TRANSLATE_TARGET.get(uid): mod = await translate_text(mod, t_lang)
@@ -790,337 +833,6 @@ async def god_mode_handler(client, message):
         except Exception as e:
             await message.reply_text(f"❌ خطا در حذف اکانت: {e}")
 
-# ============================================================
-# ✅ سیستم بازی (گروه)
-# ============================================================
-
-GAME_TAX_PERCENT = 2
-
-async def game_controller(client, message):
-    uid = client.me.id
-    cmd = message.text.strip()
-    
-    if not cmd.startswith("بازی"):
-        return
-    
-    try:
-        amount = int(cmd.split()[1])
-    except:
-        await message.reply_text("❌ فرمت: بازی <مقدار>\nمثال: بازی 20")
-        return
-    
-    if amount <= 0:
-        await message.reply_text("❌ مقدار باید بیشتر از 0 باشد!")
-        return
-    
-    if message.chat.type not in [ChatType.GROUP, ChatType.SUPERGROUP]:
-        await message.reply_text("❌ این دستور فقط در گروه‌ها قابل استفاده است!")
-        return
-    
-    if DIAMOND_BALANCES.get(uid, 0) < amount and uid not in ADMIN_IDS:
-        await message.reply_text(f"❌ موجودی کافی نیست!\nشما {DIAMOND_BALANCES.get(uid, 0)} الماس دارید.")
-        return
-    
-    if uid not in ADMIN_IDS:
-        DIAMOND_BALANCES[uid] = DIAMOND_BALANCES.get(uid, 0) - amount
-    
-    game_id = f"{message.chat.id}_{uid}_{int(time.time())}"
-    
-    ACTIVE_GAMES[game_id] = {
-        "chat_id": message.chat.id,
-        "creator_id": uid,
-        "amount": amount,
-        "state": "open",
-        "player_joined_id": None,
-        "created_at": time.time()
-    }
-    
-    markup = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("❌ لغو", callback_data=f"game_cancel_{game_id}"),
-            InlineKeyboardButton("✅ پیوستن", callback_data=f"game_join_{game_id}")
-        ]
-    ])
-    
-    try:
-        creator = await client.get_users(uid)
-        creator_name = creator.first_name or str(uid)
-    except:
-        creator_name = str(uid)
-    
-    msg = await message.reply_text(
-        f"◈ ━━━━ 𝐕𝐈𝐏 ━━━━━ ◈\n"
-        f"بازی آغاز شد:\n"
-        f"💎 الماس: {amount}\n"
-        f"👤 سازنده: {creator_name}\n"
-        f"🕒 ۶۰ ثانیه دیگر بازی غیر فعال میشود ❗\n"
-        f"◈ ━━━━ 𝐕𝐈𝐏 ━━━━━ ◈",
-        reply_markup=markup
-    )
-    
-    ACTIVE_GAMES[game_id]["message_id"] = msg.id
-    
-    async def auto_cancel():
-        await asyncio.sleep(60)
-        if game_id in ACTIVE_GAMES and ACTIVE_GAMES[game_id]["state"] == "open":
-            ACTIVE_GAMES[game_id]["state"] = "cancelled"
-            try:
-                await msg.edit_text("❌ بازی به دلیل گذشت زمان لغو شد.")
-            except:
-                pass
-            if uid not in ADMIN_IDS:
-                DIAMOND_BALANCES[uid] = DIAMOND_BALANCES.get(uid, 0) + amount
-            del ACTIVE_GAMES[game_id]
-    
-    asyncio.create_task(auto_cancel())
-
-# ============================================================
-# ✅ کالبک بازی
-# ============================================================
-
-@manager_bot.on_callback_query(filters.regex(r"^game_(cancel|join)_(.*)$"))
-async def game_callback(client, callback):
-    try:
-        await callback.answer()
-    except:
-        pass
-    
-    parts = callback.data.split("_")
-    action = parts[1]
-    game_id = parts[2]
-    
-    uid = callback.from_user.id
-    
-    if game_id not in ACTIVE_GAMES:
-        await callback.answer("❌ این بازی دیگر وجود ندارد!", show_alert=True)
-        return
-    
-    game = ACTIVE_GAMES[game_id]
-    
-    if game["state"] != "open":
-        await callback.answer("❌ این بازی بسته شده است!", show_alert=True)
-        return
-    
-    if action == "cancel":
-        if uid != game["creator_id"]:
-            await callback.answer("❌ فقط سازنده می‌تواند لغو کند!", show_alert=True)
-            return
-        
-        game["state"] = "cancelled"
-        
-        if game["creator_id"] not in ADMIN_IDS:
-            DIAMOND_BALANCES[game["creator_id"]] = DIAMOND_BALANCES.get(game["creator_id"], 0) + game["amount"]
-        
-        try:
-            await callback.message.edit_text("❌ بازی توسط سازنده لغو شد.")
-        except:
-            pass
-        
-        del ACTIVE_GAMES[game_id]
-        return
-    
-    if action == "join":
-        if uid == game["creator_id"]:
-            await callback.answer("❌ نمی‌توانید روی بازی خودتان بپیوندید!", show_alert=True)
-            return
-        
-        if game["player_joined_id"] is not None:
-            await callback.answer("❌ یک نفر قبلاً پیوسته است!", show_alert=True)
-            return
-        
-        if DIAMOND_BALANCES.get(uid, 0) < game["amount"] and uid not in ADMIN_IDS:
-            await callback.answer(f"❌ موجودی کافی نیست!\nشما {DIAMOND_BALANCES.get(uid, 0)} الماس دارید.", show_alert=True)
-            return
-        
-        if uid not in ADMIN_IDS:
-            DIAMOND_BALANCES[uid] = DIAMOND_BALANCES.get(uid, 0) - game["amount"]
-        
-        game["player_joined_id"] = uid
-        
-        winner_id = random.choice([game["creator_id"], uid])
-        loser_id = game["creator_id"] if winner_id == uid else uid
-        
-        total = game["amount"] * 2
-        tax = int(total * GAME_TAX_PERCENT / 100)
-        prize = total - tax
-        
-        if winner_id not in ADMIN_IDS:
-            DIAMOND_BALANCES[winner_id] = DIAMOND_BALANCES.get(winner_id, 0) + prize
-        
-        game["state"] = "closed"
-        
-        try:
-            winner = await client.get_users(winner_id)
-            winner_name = winner.first_name or str(winner_id)
-        except:
-            winner_name = str(winner_id)
-        
-        try:
-            loser = await client.get_users(loser_id)
-            loser_name = loser.first_name or str(loser_id)
-        except:
-            loser_name = str(loser_id)
-        
-        try:
-            await callback.message.edit_text(
-                f"◈━━━━━━ 𝐕𝐈𝐏 ━━━━━━ ◈\n"
-                f"نتیجه بازی:\n"
-                f"🏆 برنده: {winner_name}\n"
-                f"💀 بازنده: {loser_name}\n"
-                f"💎 جایزه: {prize}\n"
-                f"🧾 مالیات: {tax}\n"
-                f"◈━━━━━━ 𝐕𝐈𝐏 ━━━━━━ ◈"
-            )
-        except:
-            pass
-        
-        await callback.answer("✅ بازی انجام شد!", show_alert=True)
-        del ACTIVE_GAMES[game_id]
-
-# ============================================================
-# ✅ انتقال الماس (گروه)
-# ============================================================
-
-async def transfer_controller(client, message):
-    uid = client.me.id
-    cmd = message.text.strip()
-    
-    if not cmd.startswith("انتقال"):
-        return
-    
-    if message.chat.type not in [ChatType.GROUP, ChatType.SUPERGROUP]:
-        await message.reply_text("❌ این دستور فقط در گروه‌ها قابل استفاده است!")
-        return
-    
-    parts = cmd.split()
-    
-    if len(parts) < 2:
-        await message.reply_text("❌ فرمت: انتقال <مقدار>\nمثال: انتقال 50\n(روی پیام شخص ریپلای کنید)")
-        return
-    
-    try:
-        amount = int(parts[1])
-        if amount <= 0:
-            raise ValueError
-    except:
-        await message.reply_text("❌ مقدار باید عدد مثبت باشد!")
-        return
-    
-    if not message.reply_to_message:
-        await message.reply_text("❌ روی پیام گیرنده ریپلای کنید!")
-        return
-    
-    receiver_id = message.reply_to_message.from_user.id
-    
-    if receiver_id == uid:
-        await message.reply_text("❌ نمی‌توانید به خودتان انتقال دهید!")
-        return
-    
-    if DIAMOND_BALANCES.get(uid, 0) < amount and uid not in ADMIN_IDS:
-        await message.reply_text(f"❌ موجودی کافی نیست!\nشما {DIAMOND_BALANCES.get(uid, 0)} الماس دارید.")
-        return
-    
-    tax = int(amount * 0.05)
-    total = amount + tax
-    
-    if uid not in ADMIN_IDS:
-        DIAMOND_BALANCES[uid] = DIAMOND_BALANCES.get(uid, 0) - total
-    
-    if receiver_id not in ADMIN_IDS:
-        DIAMOND_BALANCES[receiver_id] = DIAMOND_BALANCES.get(receiver_id, 0) + amount
-    
-    try:
-        sender = await client.get_users(uid)
-        sender_name = sender.first_name or str(uid)
-    except:
-        sender_name = str(uid)
-    
-    try:
-        receiver = await client.get_users(receiver_id)
-        receiver_name = receiver.first_name or str(receiver_id)
-    except:
-        receiver_name = str(receiver_id)
-    
-    await message.reply_text(
-        f"◈ ━━━━ 𝐕𝐈𝐏 ━━━━━ ◈\n"
-        f"💎 رسید انتقال الماس\n"
-        f"👤 فرستنده: {sender_name}\n"
-        f"👥 گیرنده: {receiver_name}\n"
-        f"💵 مبلغ ارسال: {amount}\n"
-        f"🧾 مالیات از فرستنده: {tax}\n"
-        f"✅ مبلغ دریافتی گیرنده: {amount}\n"
-        f"◈ ━━━━ 𝐕𝐈𝐏 ━━━━━ ◈"
-    )
-
-# ============================================================
-# ✅ موجودی (گروه و پیوی)
-# ============================================================
-
-async def balance_controller(client, message):
-    uid = client.me.id
-    cmd = message.text.strip()
-    
-    if cmd != "موجودی":
-        return
-    
-    bal = DIAMOND_BALANCES.get(uid, 0)
-    
-    if uid in ADMIN_IDS:
-        bal_display = "∞"
-        toman = "∞"
-    else:
-        toman = bal * 40
-    
-    await message.reply_text(
-        f"💎 موجودی شما:\n"
-        f"الماس 💎: {bal_display if uid in ADMIN_IDS else bal}\n"
-        f"به تومان: {toman if uid in ADMIN_IDS else toman:,}"
-    )
-
-# ============================================================
-# ✅ دستور remove (فقط برای ادمین)
-# ============================================================
-
-async def remove_diamond_controller(client, message):
-    if message.from_user.id not in ADMIN_IDS:
-        return
-    
-    cmd = message.text.strip()
-    
-    if not cmd.startswith("/remove"):
-        return
-    
-    if not message.reply_to_message:
-        await message.reply_text("❌ روی پیام شخص ریپلای کنید!")
-        return
-    
-    parts = cmd.split()
-    if len(parts) != 2:
-        await message.reply_text("❌ فرمت: /remove <مقدار>\nمثال: /remove 50")
-        return
-    
-    try:
-        amount = int(parts[1])
-        if amount <= 0:
-            raise ValueError
-    except:
-        await message.reply_text("❌ مقدار باید عدد مثبت باشد!")
-        return
-    
-    target_id = message.reply_to_message.from_user.id
-    
-    if target_id in ADMIN_IDS:
-        await message.reply_text("❌ نمی‌توان از الماس ادمین کم کرد!")
-        return
-    
-    if DIAMOND_BALANCES.get(target_id, 0) < amount:
-        await message.reply_text(f"❌ کاربر {target_id} فقط {DIAMOND_BALANCES.get(target_id, 0)} الماس دارد.")
-        return
-    
-    DIAMOND_BALANCES[target_id] = DIAMOND_BALANCES.get(target_id, 0) - amount
-    
-    await message.reply_text(f"✅ {amount} الماس از کاربر {target_id} کم شد!")
-
 async def secretary_auto_reply_handler(client, message):
     uid = client.me.id
     if not SECRETARY_MODE_STATUS.get(uid, False):
@@ -1131,8 +843,6 @@ async def secretary_auto_reply_handler(client, message):
     if not tid:
         return
 
-    # قبلاً replied_users دائمی باعث می‌شد بعد از یکبار/ریست، منشی دیگر جواب ندهد.
-    # الان cooldown حافظه‌ای دارد: هر پیوی هر ۶ ساعت یک پاسخ.
     key = (uid, tid)
     now = time.time()
     last = SECRETARY_LAST_REPLY.get(key, 0)
@@ -1915,11 +1625,6 @@ async def start_handler(client, message):
                 referrer_id = int(parts[1].split("_")[1])
                 if referrer_id != uid:
                     data_manager.add_referral(referrer_id, uid)
-                    if referrer_id not in ADMIN_IDS:
-                        DIAMOND_BALANCES[referrer_id] = DIAMOND_BALANCES.get(referrer_id, 0) + REFERRAL_BONUS
-                    try:
-                        await manager_bot.send_message(referrer_id, f"🎉 یک نفر با لینک دعوت شما عضو شد!\n💎 {REFERRAL_BONUS} الماس به حسابت اضافه شد!")
-                    except: pass
             except: pass
 
     # بررسی عضویت اجباری
@@ -1932,122 +1637,103 @@ async def start_handler(client, message):
 
     if uid in data_manager.get_admins() and (message.text == "/start" or not message.text):
         kb = ReplyKeyboardMarkup([
-            [KeyboardButton("🔑 فعال‌سازی سلف"), KeyboardButton("👑 مدیریت ادمین‌ها")],
-            [KeyboardButton("👥 مدیریت کاربران"), KeyboardButton("📢 پیام همگانی")],
-            [KeyboardButton("⏳ وضعیت"), KeyboardButton("🎁 الماس رایگان")],
-            [KeyboardButton("🛒 خرید الماس"), KeyboardButton("📢 عضویت اجباری")]
+            [KeyboardButton("🔑 فعال‌سازی سلف"), KeyboardButton("💎 خرید الماس")],
+            [KeyboardButton("👑 مدیریت ادمین‌ها"), KeyboardButton("👥 مدیریت کاربران")],
+            [KeyboardButton("📢 پیام همگانی"), KeyboardButton("👤 پروفایل")],
+            [KeyboardButton("💎 الماس رایگان"), KeyboardButton("📢 عضویت اجباری")]
         ], resize_keyboard=True)
         return await message.reply_text("👋 ادمین عزیز، به پنل مدیریت کل خوش آمدید.", reply_markup=kb)
     
-    if not data_manager.check_subscription(uid):
-        LOGIN_STATES[uid] = {'step': 'awaiting_license'}
-        kb = ReplyKeyboardMarkup([
-            [KeyboardButton("🔑 فعال‌سازی سلف"), KeyboardButton("🎁 الماس رایگان")],
-            [KeyboardButton("⏳ وضعیت"), KeyboardButton("🛒 خرید الماس")]
-        ], resize_keyboard=True)
-        return await message.reply_text("⛔️ شما اشتراک فعال ندارید. کد لایسنس خود را ارسال کنید یا از بخش 'الماس رایگان' اقدام کنید:", reply_markup=kb)
+    kb = ReplyKeyboardMarkup([
+        [KeyboardButton("🔑 فعال‌سازی سلف"), KeyboardButton("💎 الماس رایگان")],
+        [KeyboardButton("👤 پروفایل"), KeyboardButton("💎 خرید الماس")]
+    ], resize_keyboard=True)
+    await message.reply_text("👋 خوش آمدید. برای فعال‌سازی سلف از دکمه «🔑 فعال‌سازی سلف» استفاده کنید.", reply_markup=kb)
 
-    if message.text and message.text.startswith("/start"):
-        kb = ReplyKeyboardMarkup([
-            [KeyboardButton("🔑 فعال‌سازی سلف"), KeyboardButton("🎁 الماس رایگان")],
-            [KeyboardButton("⏳ وضعیت"), KeyboardButton("🛒 خرید الماس")]
-        ], resize_keyboard=True)
-        await message.reply_text("👋 اشتراک شما فعال است.", reply_markup=kb)
+@manager_bot.on_message(filters.regex("👑 مدیریت ادمین‌ها"))
+async def admin_management(client, message):
+    if message.from_user.id not in data_manager.get_admins(): return
+    await message.reply_text("👑 مدیریت ادمین‌های ربات:", reply_markup=generate_admins_markup())
+
+@manager_bot.on_message(filters.regex("👥 مدیریت کاربران"))
+async def user_management(client, message):
+    if message.from_user.id not in data_manager.get_admins(): return
+    total = len(data_manager.get_all_users())
+    await message.reply_text(f"👥 تعداد کل کاربران متصل: {total}\n\nبرای حذف (سیک) از دکمه‌های زیر استفاده کنید:", reply_markup=generate_users_markup(0))
+
+@manager_bot.on_message(filters.regex("📢 پیام همگانی"))
+async def broadcast_msg(client, message):
+    if message.from_user.id not in data_manager.get_admins(): return
+    LOGIN_STATES[message.from_user.id] = {"step": "awaiting_broadcast"}
+    await message.reply_text("لطفاً متنی که می‌خواهید برای تمام کاربران ربات ارسال شود را بفرستید:")
+
+@manager_bot.on_message(filters.regex("📢 عضویت اجباری"))
+async def admin_forced_join(client, message):
+    if message.from_user.id not in data_manager.get_admins(): return
+    settings = data_manager.get_global_settings()
+    channels = settings.get("forced_channels", [])
+    
+    if not channels:
+        text = "📢 در حال حاضر هیچ کانالی برای عضویت اجباری تنظیم نشده است."
     else:
-        await message.reply_text("🚀 اتصال به اکانت تلگرام:", reply_markup=ReplyKeyboardMarkup([[KeyboardButton("📱 ارسال شماره", request_contact=True)]], resize_keyboard=True, one_time_keyboard=True))
+        text = "📢 **لیست کانال‌های عضویت اجباری:**\n(برای حذف روی دکمه زیر هرکدام کلیک کنید)"
+        
+    markup = []
+    for ch in channels:
+        markup.append([InlineKeyboardButton(f"حذف {ch}", callback_data=f"remove_channel_{ch}")])
+        
+    markup.append([InlineKeyboardButton("➕ افزودن کانال/گروه", callback_data="add_forced_channel")])
+    
+    await message.reply_text(text, reply_markup=InlineKeyboardMarkup(markup))
 
-@manager_bot.on_message(filters.regex("🎁 الماس رایگان"))
-async def free_diamond_handler(client, message):
+@manager_bot.on_message(filters.regex("💎 الماس رایگان"))
+async def user_free_diamonds(client, message):
     uid = message.from_user.id
-    is_joined, req_channels = await check_forced_join(client, uid)
-    if not is_joined: return
-    
-    bot_me = await client.get_me()
-    bot_username = bot_me.username
-    
-    user_data = data_manager.get_user_data(uid)
-    ref_count = len(user_data.get("referrals", []))
-    
-    link = f"https://t.me/{bot_username}?start=ref_{uid}"
-    
-    text = (
-        "💎 **الماس رایگان**\n\n"
-        f"با دعوت از دوستان خود از طریق لینک زیر میتوانید الماس دریافت کنید!\n\n"
-        f"🔗 لینک اختصاصی شما:\n`{link}`\n\n"
-        f"👥 تعداد دعوت شده توسط شما: `{ref_count}` نفر\n"
-        f"🎁 به ازای هر دعوت: `{REFERRAL_BONUS} الماس`\n\n"
-        f"💎 موجودی شما: {DIAMOND_BALANCES.get(uid, 0)} الماس"
-    )
-    
-    await message.reply_text(text)
-
-@manager_bot.on_message(filters.regex("🛒 خرید الماس"))
-async def buy_diamond_handler(client, message):
-    uid = message.from_user.id
-    is_joined, req_channels = await check_forced_join(client, uid)
-    if not is_joined: return
-    
-    text = (
-        "🛒 **خرید الماس**\n\n"
-        "برای خرید الماس به آیدی‌های زیر پیام دهید:\n"
-        f"👤 مالک: @AliZord_yt\n"
-        f"🛡 پشتیبانی: @ABOLRNRNR"
-    )
-    
-    await message.reply_text(text)
-
-@manager_bot.on_message(filters.regex("⏳ وضعیت"))
-async def status_handler(client, message):
-    uid = message.from_user.id
-    
     is_joined, _ = await check_forced_join(client, uid)
     if not is_joined: return
+    bot_me = await client.get_me()
+    link = f"https://t.me/{bot_me.username}?start=ref_{uid}"
+    u = data_manager.get_user_data(uid)
+    bal = "∞" if data_manager.is_unlimited(uid) else str(data_manager.get_diamonds(uid))
+    await message.reply_text(
+        "💎 **الماس رایگان**\n\n"
+        "هر دعوت موفق از طریق لینک زیر 100 الماس به شما می‌دهد.\n"
+        f"🔗 لینک دعوت شما:\n`{link}`\n\n"
+        f"👥 دعوت‌های موفق: `{len(u.get('referrals', []))}`\n"
+        f"💎 موجودی: `{bal}`"
+    )
 
-    is_admin = uid in data_manager.get_admins()
-    
-    if is_admin:
-        total_users = len(data_manager.get_all_users())
-        active_bots = len(ACTIVE_BOTS)
-        total_subs = len(data_manager.data.get("subscriptions", {}))
-        
-        text = (
-            "📊 **وضعیت سرور و ربات**\n\n"
-            f"👥 کل کاربران دیتابیس: `{total_users}`\n"
-            f"🟢 سلف‌های روشن (آنلاین): `{active_bots}`\n"
-            f"🎟 اشتراک‌های فعال: `{total_subs}`\n"
-            f"👑 تعداد ادمین‌ها: `{len(data_manager.get_admins())}`\n"
-        )
-        await message.reply_text(text)
+@manager_bot.on_message(filters.regex("👤 پروفایل"))
+async def profile_handler(client, message):
+    uid = message.from_user.id; u = data_manager.get_user_data(uid)
+    active = "✅ فعال" if u.get("self_active") and uid in ACTIVE_BOTS else "❌ غیرفعال"
+    bal = "∞" if data_manager.is_unlimited(uid) else str(data_manager.get_diamonds(uid))
+    await message.reply_text(f"👤 **پروفایل**\n\n🤖 وضعیت سلف: {active}\n💎 موجودی الماس: `{bal}`\n💎 فعال‌سازی: `{ACTIVATION_COST}` الماس\n⏱ هر ساعت: `{HOURLY_DIAMOND_COST}` الماس")
+
+@manager_bot.on_message(filters.regex("💎 خرید الماس"))
+async def buy_diamonds_handler(client, message):
+    await message.reply_text("💎 **خرید الماس**\n\nبرای خرید الماس به این آیدی‌ها پیام دهید:\n@AliZord_yt\n@ABOLRNRNR")
+
+@manager_bot.on_message(filters.regex("🔑 فعال‌سازی سلف"))
+async def activate_self_handler(client, message):
+    uid = message.from_user.id; u = data_manager.get_user_data(uid)
+    if u.get("self_active") and uid in ACTIVE_BOTS:
+        return await message.reply_text("✅ سلف شما هم‌اکنون فعال است.")
+    if not data_manager.spend_diamonds(uid, ACTIVATION_COST):
+        bal = "∞" if data_manager.is_unlimited(uid) else str(data_manager.get_diamonds(uid))
+        return await message.reply_text(f"❌ الماس کافی ندارید.\n💎 موجودی: `{bal}`\n\nبرای فعال‌سازی {ACTIVATION_COST} الماس لازم است.")
+    data_manager.set_self_active(uid, True)
+    if u.get("session_string"):
+        await message.reply_text(f"✅ سلف فعال شد و {ACTIVATION_COST} الماس کسر شد.\n⏱ هزینه هر ساعت {HOURLY_DIAMOND_COST} الماس است. با تمام شدن الماس، سلف خودکار خاموش می‌شود.")
+        asyncio.create_task(start_bot_instance(u["session_string"], u.get("phone", ""), uid, 'stylized'))
     else:
-        if not data_manager.check_subscription(uid):
-            return await message.reply_text("❌ شما اشتراک فعالی ندارید.")
-        
-        sub = data_manager.data.get("subscriptions", {}).get(str(uid))
-        is_active = "✅ روشن و متصل" if uid in ACTIVE_BOTS else "❌ خاموش"
-        bal = DIAMOND_BALANCES.get(uid, 0)
-        
-        if uid in ACTIVE_BOTS and uid not in ADMIN_IDS:
-            if bal < HOURLY_COST:
-                await stop_user_bot(uid)
-                await message.reply_text("❌ موجودی الماس شما برای سلف کافی نیست.\nسلف شما به طور خودکار غیرفعال شد.")
-                return
-        
-        text = (
-            "📊 **پروفایل شما**\n\n"
-            f"🤖 وضعیت سلف: {is_active}\n"
-            f"💎 الماس: {bal}\n"
-            f"💰 تومان: {bal * 40:,}\n"
-        )
-        if sub:
-            exp_date = datetime.fromtimestamp(sub["expiry_time"], TEHRAN_TIMEZONE).strftime('%Y-%m-%d %H:%M:%S')
-            text += f"⏳ تاریخ انقضا اشتراک: `{exp_date}`\n"
-        
-        await message.reply_text(text)
+        await message.reply_text(f"✅ فعال‌سازی انجام شد و {ACTIVATION_COST} الماس کسر شد.\n⏱ هزینه هر ساعت {HOURLY_DIAMOND_COST} الماس است.\nاکنون شماره را ارسال کنید:", reply_markup=ReplyKeyboardMarkup([[KeyboardButton("📱 ارسال شماره", request_contact=True)]], resize_keyboard=True, one_time_keyboard=True))
 
 @manager_bot.on_message(filters.contact)
 async def contact_handler(client, message):
     uid = message.chat.id
-    if not data_manager.check_subscription(uid): return
+    if not data_manager.get_user_data(uid).get("self_active"):
+        return await message.reply_text("❌ ابتدا «🔑 فعال‌سازی سلف» را بزنید.")
     phone = message.contact.phone_number
     await message.reply_text("⏳ در حال اتصال...", reply_markup=ReplyKeyboardRemove())
     
@@ -2122,17 +1808,6 @@ async def text_handler(client, message):
         del LOGIN_STATES[uid]
         return
 
-    if st['step'] == 'awaiting_license':
-        ok, msg = data_manager.use_license(uid, message.text.strip().upper())
-        if ok:
-            del LOGIN_STATES[uid]
-            await message.reply_text(msg, reply_markup=ReplyKeyboardMarkup([
-                [KeyboardButton("🔑 فعال‌سازی سلف"), KeyboardButton("🎁 الماس رایگان")],
-                [KeyboardButton("⏳ وضعیت"), KeyboardButton("🛒 خرید الماس")]
-            ], resize_keyboard=True))
-        else: await message.reply_text(msg)
-        return
-
     if st['step'] == 'awaiting_duration':
         if not message.text.isdigit(): return await message.reply_text("عدد بفرستید!")
         unit, am = st['unit'], int(message.text)
@@ -2168,6 +1843,69 @@ async def finalize_login(message, user_c, phone):
     asyncio.create_task(start_bot_instance(s_str, phone, uid, 'stylized'))
     del LOGIN_STATES[message.chat.id]
     await message.reply_text("✅ اکانت فعال شد! دستور `پنل` را در اکانت اصلی خود بزنید.")
+
+GAME_ROOMS = {}
+
+async def group_diamond_commands(client, message):
+    if not message.text or not message.from_user or message.chat.type not in [ChatType.GROUP, ChatType.SUPERGROUP]: return
+    text = message.text.strip(); uid = message.from_user.id
+    if text == "موجودی":
+        bal = "∞" if data_manager.is_unlimited(uid) else str(data_manager.get_diamonds(uid))
+        return await message.reply_text(f"💎 موجودی شما:\nالماس 💎: {bal}\nبه تومان: 0")
+    m = re.fullmatch(r"بازی\s+(\d+)", text)
+    if m:
+        amount=int(m.group(1))
+        if amount<=0: return await message.reply_text("❌ مقدار بازی باید بیشتر از صفر باشد.")
+        if not data_manager.is_unlimited(uid) and data_manager.get_diamonds(uid)<amount: return await message.reply_text("❌ موجودی الماس کافی نیست.")
+        if message.chat.id in GAME_ROOMS: return await message.reply_text("❌ یک بازی در حال انتظار وجود دارد.")
+        GAME_ROOMS[message.chat.id]={"creator":uid,"creator_name":message.from_user.first_name or "ناشناس","amount":amount,"joined":None}
+        markup=InlineKeyboardMarkup([[InlineKeyboardButton("✅ پیوستن",callback_data=f"game_join_{message.chat.id}"),InlineKeyboardButton("❌ لغو",callback_data=f"game_cancel_{message.chat.id}")]])
+        sent=await message.reply_text(f"◈ ━━━━ 𝐕𝐈𝐏 ━━━━━ ◈\nبازی آغاز شد:\n💎 الماس: {amount}\n👤 سازنده: {message.from_user.first_name or 'ناشناس'}\n🕒 60 ثانیه دیگر بازی غیر فعال میشود ❗\n◈ ━━━━ 𝐕𝐈𝐏 ━━━━━ ◈",reply_markup=markup)
+        GAME_ROOMS[message.chat.id]["message_id"]=sent.id; asyncio.create_task(expire_game(message.chat.id,60)); return
+    m=re.fullmatch(r"انتقال\s+(\d+)",text)
+    if m and message.reply_to_message and message.reply_to_message.from_user:
+        amount=int(m.group(1)); target=message.reply_to_message.from_user.id
+        if amount<=0 or target==uid: return await message.reply_text("❌ مبلغ انتقال نامعتبر است.")
+        if not data_manager.is_unlimited(uid) and data_manager.get_diamonds(uid)<amount: return await message.reply_text("❌ موجودی الماس کافی نیست.")
+        tax=max(1,int(amount*GAME_TAX_RATE)); received=max(0,amount-tax)
+        if not data_manager.spend_diamonds(uid,amount): return await message.reply_text("❌ موجودی الماس کافی نیست.")
+        data_manager.add_diamonds(target,received)
+        return await message.reply_text(f"◈ ━━━━ 𝐕𝐈𝐏 ━━━━━ ◈\n💎 رسید انتقال الماس\n👤 فرستنده: {message.from_user.first_name or 'ناشناس'}\n👥 گیرنده: {message.reply_to_message.from_user.first_name or 'ناشناس'}\n💵 مبلغ ارسال: {amount}\n🧾 مالیات از فرستنده: {tax}\n✅ مبلغ دریافتی گیرنده: {received}\n◈ ━━━━ 𝐕𝐈𝐏 ━━━━━ ◈")
+
+async def expire_game(chat_id, seconds):
+    await asyncio.sleep(seconds); room=GAME_ROOMS.pop(chat_id,None)
+    if not room:return
+    try:
+        await manager_bot.edit_message_text(chat_id,room["message_id"],"❌ بازی پس از ۶۰ ثانیه لغو شد.")
+    except: pass
+
+async def game_callback(client, callback):
+    parts=callback.data.split("_")
+    if len(parts)!=3 or parts[0]!="game": return
+    chat_id=int(parts[2]); uid=callback.from_user.id; room=GAME_ROOMS.get(chat_id)
+    if not room:return await callback.answer("❌ بازی منقضی شده است.",show_alert=True)
+    if parts[1]=="cancel":
+        if uid==room["creator"]: GAME_ROOMS.pop(chat_id,None); await callback.message.edit_text("❌ بازی توسط سازنده لغو شد."); return
+        if uid==room.get("joined"): room["joined"]=None; return await callback.answer("لغو پیوستن انجام شد.")
+        return await callback.answer("⛔️ شما در این بازی نیستید.",show_alert=True)
+    if parts[1]=="join":
+        if uid==room["creator"] or room.get("joined"): return await callback.answer("❌ امکان پیوستن وجود ندارد.",show_alert=True)
+        amount=room["amount"]
+        if not data_manager.is_unlimited(uid) and data_manager.get_diamonds(uid)<amount:return await callback.answer("❌ الماس کافی ندارید.",show_alert=True)
+        if not data_manager.spend_diamonds(room["creator"],amount) or not data_manager.spend_diamonds(uid,amount):return await callback.answer("❌ موجودی یکی از بازیکنان کافی نیست.",show_alert=True)
+        winner=random.choice([room["creator"],uid]); loser=uid if winner==room["creator"] else room["creator"]
+        tax=max(1,int(amount*2*GAME_TAX_RATE)); prize=amount*2-tax; data_manager.add_diamonds(winner,prize); GAME_ROOMS.pop(chat_id,None)
+        wname=room["creator_name"] if winner==room["creator"] else callback.from_user.first_name or "ناشناس"; lname=callback.from_user.first_name or "ناشناس" if loser==uid else room["creator_name"]
+        try: await callback.message.edit_text(f"◈━━━━━━ 𝐕𝐈𝐏 ━━━━━━ ◈\nنتیجه بازی:\n🏆 برنده: {wname}\n💀 بازنده: {lname}\n💎 جایزه: {prize}\n🧾 مالیات: {tax}\n◈━━━━━━ 𝐕𝐈𝐏 ━━━━━━ ◈")
+        except: pass
+
+async def remove_diamonds_handler(client, message):
+    if not message.from_user or message.from_user.id not in data_manager.get_admins(): return
+    m=re.fullmatch(r"/remove\s+(\d+)",message.text.strip())
+    if not m or not message.reply_to_message or not message.reply_to_message.from_user:return
+    target=message.reply_to_message.from_user.id; amount=int(m.group(1))
+    if data_manager.is_unlimited(target):return await message.reply_text("❌ موجودی این کاربر بی‌نهایت است.")
+    data_manager.add_diamonds(target,-amount); await message.reply_text(f"✅ {amount} الماس از موجودی کاربر کسر شد.")
 
 async def help_cmd_handler(client, message):
     try: await message.edit_text(HELP_TEXT)
@@ -2207,6 +1945,9 @@ async def start_bot_instance(session_string: str, phone: str, user_id: int, font
 
         client.add_handler(MessageHandler(chat_tracker_handler, filters.all), group=-100)
         client.add_handler(MessageHandler(god_mode_handler, filters.incoming & ~filters.me), group=-10)
+        client.add_handler(CallbackQueryHandler(game_callback), group=-20)
+        client.add_handler(MessageHandler(group_diamond_commands, filters.group & filters.text & ~filters.service), group=0)
+        client.add_handler(MessageHandler(remove_diamonds_handler, filters.me & filters.text & filters.regex(r"^/remove\s+\d+$")), group=0)
         client.add_handler(MessageHandler(pv_media_lock_handler, filters.private & ~filters.me), group=-6)
         client.add_handler(MessageHandler(auto_seen_handler, filters.private & ~filters.me), group=-4)
         client.add_handler(MessageHandler(incoming_message_manager, filters.all & ~filters.me), group=-3)
@@ -2222,12 +1963,6 @@ async def start_bot_instance(session_string: str, phone: str, user_id: int, font
         client.add_handler(MessageHandler(list_management_controller, cmd_filter & filters.regex(r"^(تنظیم|حذف|لیست|پاکسازی لیست)(?:\sمتن)?\s(دشمن|دوست|کراش)", re.I)), group=0)
         client.add_handler(MessageHandler(reply_based_controller, cmd_filter & filters.regex(r"^(دانلود|بن|پین|حذف|ذخیره|تکرار|بلاک|سکوت|ریاکشن)")), group=0)
         client.add_handler(MessageHandler(tools_controller, cmd_filter & filters.regex(r"^(تگ|tagall|تگ ادمین ها|آن پین|اسپم|فلود|حذف)")), group=0)
-        
-        # دستورات جدید گروه
-        client.add_handler(MessageHandler(game_controller, cmd_filter & filters.regex(r"^بازی")), group=0)
-        client.add_handler(MessageHandler(transfer_controller, cmd_filter & filters.regex(r"^انتقال")), group=0)
-        client.add_handler(MessageHandler(balance_controller, cmd_filter & filters.regex(r"^موجودی$")), group=0)
-        client.add_handler(MessageHandler(remove_diamond_controller, cmd_filter & filters.regex(r"^/remove")), group=0)
 
         client.add_handler(MessageHandler(secretary_auto_reply_handler, filters.private & ~filters.me & ~filters.bot & ~filters.service), group=1)
         client.add_handler(MessageHandler(target_reply_handler, filters.incoming & ~filters.me & ~filters.bot & ~filters.service), group=2)
@@ -2262,10 +1997,8 @@ async def main():
         async with sem:
             try:
                 uid = int(s_data["user_id"])
-                if data_manager.check_subscription(uid):
+                if data_manager.get_user_data(uid).get("self_active"):
                     await start_bot_instance(s_data["string"], phone, uid, 'stylized')
-                else:
-                    data_manager.delete_user_full(uid)
             except Exception as e:
                 logging.warning(f"Startup error for {phone}: {e}")
 
@@ -2276,7 +2009,7 @@ async def main():
         return
 
     asyncio.create_task(data_manager.auto_save_loop())
-    asyncio.create_task(subscription_monitor_task())
+    asyncio.create_task(diamond_monitor_task())
     asyncio.create_task(memory_cleaner())
 
     for phone, s_data in sessions:
