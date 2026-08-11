@@ -32,7 +32,7 @@ from pyrogram.errors import (
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s - %(message)s')
 
 # ============================================================
-# ✅ تنظیمات اصلی
+# ✅ تنظیمات اصلی (تغییر دهید)
 # ============================================================
 API_ID = 37386944
 API_HASH = "d64069023db75d11ae5982f653069a98"
