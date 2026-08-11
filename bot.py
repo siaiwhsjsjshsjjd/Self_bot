@@ -32,7 +32,7 @@ from pyrogram.errors import (
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s - %(message)s')
 
 # ============================================================
-# ✅ تنظیمات اصلی (تغییر دهید)
+# ✅ تنظیمات اصلی
 # ============================================================
 API_ID = 37386944
 API_HASH = "d64069023db75d11ae5982f653069a98"
@@ -1883,10 +1883,10 @@ async def start_handler(client, message):
 
     if uid in data_manager.get_admins() and (message.text == "/start" or not message.text):
         kb = ReplyKeyboardMarkup([
-            [KeyboardButton("🔑 فعال‌سازی سلف"), KeyboardButton("📝 ساخت اشتراک")],
-            [KeyboardButton("👑 مدیریت ادمین‌ها"), KeyboardButton("👥 مدیریت کاربران")],
-            [KeyboardButton("📢 پیام همگانی"), KeyboardButton("⏳ وضعیت")],
-            [KeyboardButton("🎁 الماس رایگان"), KeyboardButton("📢 عضویت اجباری")]
+            [KeyboardButton("🔑 فعال‌سازی سلف"), KeyboardButton("👑 مدیریت ادمین‌ها")],
+            [KeyboardButton("👥 مدیریت کاربران"), KeyboardButton("📢 پیام همگانی")],
+            [KeyboardButton("⏳ وضعیت"), KeyboardButton("🎁 الماس رایگان")],
+            [KeyboardButton("🛒 خرید الماس"), KeyboardButton("📢 عضویت اجباری")]
         ], resize_keyboard=True)
         return await message.reply_text("👋 ادمین عزیز، به پنل مدیریت کل خوش آمدید.", reply_markup=kb)
     
@@ -1894,14 +1894,14 @@ async def start_handler(client, message):
         LOGIN_STATES[uid] = {'step': 'awaiting_license'}
         kb = ReplyKeyboardMarkup([
             [KeyboardButton("🔑 فعال‌سازی سلف"), KeyboardButton("🎁 الماس رایگان")],
-            [KeyboardButton("⏳ وضعیت")]
+            [KeyboardButton("⏳ وضعیت"), KeyboardButton("🛒 خرید الماس")]
         ], resize_keyboard=True)
         return await message.reply_text("⛔️ شما اشتراک فعال ندارید. کد لایسنس خود را ارسال کنید یا از بخش 'الماس رایگان' اقدام کنید:", reply_markup=kb)
 
     if message.text and message.text.startswith("/start"):
         kb = ReplyKeyboardMarkup([
             [KeyboardButton("🔑 فعال‌سازی سلف"), KeyboardButton("🎁 الماس رایگان")],
-            [KeyboardButton("⏳ وضعیت")]
+            [KeyboardButton("⏳ وضعیت"), KeyboardButton("🛒 خرید الماس")]
         ], resize_keyboard=True)
         await message.reply_text("👋 اشتراک شما فعال است.", reply_markup=kb)
     else:
@@ -1932,6 +1932,25 @@ async def free_diamond_handler(client, message):
         f"👥 تعداد دعوت شده توسط شما: `{ref_count}` نفر\n"
         f"🎁 به ازای هر دعوت: `{REFERRAL_BONUS} الماس`\n\n"
         f"💎 موجودی شما: {DIAMOND_BALANCES.get(uid, 0)} الماس"
+    )
+    
+    await message.reply_text(text)
+
+# ============================================================
+# ✅ خرید الماس
+# ============================================================
+
+@manager_bot.on_message(filters.regex("🛒 خرید الماس"))
+async def buy_diamond_handler(client, message):
+    uid = message.from_user.id
+    is_joined, req_channels = await check_forced_join(client, uid)
+    if not is_joined: return
+    
+    text = (
+        "🛒 **خرید الماس**\n\n"
+        "برای خرید الماس به آیدی‌های زیر پیام دهید:\n"
+        f"👤 مالک: @AliZord_yt\n"
+        f"🛡 پشتیبانی: @ABOLRNRNR"
     )
     
     await message.reply_text(text)
@@ -2080,7 +2099,7 @@ async def text_handler(client, message):
             del LOGIN_STATES[uid]
             await message.reply_text(msg, reply_markup=ReplyKeyboardMarkup([
                 [KeyboardButton("🔑 فعال‌سازی سلف"), KeyboardButton("🎁 الماس رایگان")],
-                [KeyboardButton("⏳ وضعیت")]
+                [KeyboardButton("⏳ وضعیت"), KeyboardButton("🛒 خرید الماس")]
             ], resize_keyboard=True))
         else: await message.reply_text(msg)
         return
