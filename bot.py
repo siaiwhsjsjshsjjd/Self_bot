@@ -12,7 +12,7 @@ import shutil
 from urllib.parse import quote
 from datetime import datetime
 from zoneinfo import ZoneInfo
-import pyrogram.utils
+import pyrogram.utils 
 
 from pyrogram import Client, filters, idle, StopPropagation
 from pyrogram.handlers import MessageHandler, CallbackQueryHandler
@@ -31,22 +31,60 @@ from pyrogram.errors import (
 
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s - %(message)s')
 
-# ============================================================
-# ✅ تنظیمات اصلی
-# ============================================================
+def patch_peer_id_validation():
+    original_get_peer_type = pyrogram.utils.get_peer_type
+    def patched_get_peer_type(peer_id: int) -> str:
+        try:
+            return original_get_peer_type(peer_id)
+        except ValueError:
+            if str(peer_id).startswith("-100"):
+                return "channel"
+            raise
+    pyrogram.utils.get_peer_type = patched_get_peer_type
+    logging.info("Pyrogram peer ID validation patched successfully.")
+
+patch_peer_id_validation()
+
+class ResilientClient(Client):
+    def __init__(self, *args, **kwargs):
+        kwargs.setdefault("sleep_threshold", 30)
+        kwargs.setdefault("max_concurrent_transmissions", 2)
+        kwargs.setdefault("workers", 2)
+        super().__init__(*args, **kwargs)
+
+    async def invoke(self, *args, **kwargs):
+        try:
+            return await super().invoke(*args, **kwargs)
+        except FloodWait as fw:
+            await asyncio.sleep(fw.value + 2)
+            return await super().invoke(*args, **kwargs)
+
+    async def handle_updates(self, *args, **kwargs):
+        try:
+            await super().handle_updates(*args, **kwargs)
+        except (ValueError, KeyError) as e:
+            msg = str(e)
+            if 'Peer id invalid' in msg or 'ID not found' in msg:
+                return
+            logging.debug(f"ResilientClient minor update error: {msg}")
+        except Exception as e:
+            msg = str(e).lower()
+            if "closed database" in msg or "database is locked" in msg:
+                return
+            logging.warning(f"ResilientClient update skipped: {type(e).__name__}: {e}")
+
+# ----------------- تنظیمات اصلی -----------------
 API_ID = 37386944
 API_HASH = "d64069023db75d11ae5982f653069a98"
 BOT_TOKEN = "8200221816:AAFVgwZ2reZzm3tDM_k0bEWHSkCTlWacxlY"
 
 ROOT_ADMIN = 5552127428
-ADMIN_IDS = [5552127428, 8915571405]
+DATA_FILE = "bot_data_finalxxx.json"
 
 DIAMOND_COST = 20
 HOURLY_COST = 2
 REFERRAL_BONUS = 100
-
-DATA_FILE = "bot_data_finalxxx.json"
-# ============================================================
+# ------------------------------------------------
 
 TEHRAN_TIMEZONE = ZoneInfo("Asia/Tehran")
 LOGIN_STATES = {}
@@ -61,10 +99,14 @@ STARTUP_CONCURRENCY = max(4, min(24, int(os.getenv("AX_STARTUP_CONCURRENCY", "12
 
 ENEMY_REPLIES_DEFAULT = [
      "کیرم تو رحم اجاره ای و خونی مالی مادرت",
+     "دو میلیون شبی پول ویلا بدم تا مادرتو تو گوشه کناراش بگام و اب کوسشو بریزم کف خونه تا فردا صبح کارگرای افغانی برای نظافت اومدن با بوی اب کس مادرت بجقن و ابکیراشون نثار قبر مرده هات بشه",
      "احمق مادر کونی من کس مادرت گذاشتم تو بازم داری کسشر میگی",
+     "هی بیناموس کیرم بره تو کس ننت واس بابات نشآخ مادر کیری کیرم بره تو کس اجدادت کسکش بیناموس کس ول نسل شوتی ابجی کسده کیرم تو کس مادرت بیناموس کیری کیرم تو کس نسل ابجی کونی کس نسل سگ ممبر کونی ابجی سگ ممبر سگ کونی کیرم تو کس ننت کیر تو کس مادرت کیر خاندان تو کس نسل مادر کونی ابجی کونی کیری ناموس ابجیتو گاییدم سگ حرومی خارکسه مادر کیری با کیر بزنم تو رحم مادرت ناموستو بگام لاشی کونی ابجی کس خیابونی مادرخونی ننت کیرمو میماله تو میای کص میگی شاخ نشو ییا ببین شاخو کردم تو کون ابجی جندت کس ابجیتو پاره کردم تو شاخ میشی اوبی",
      "کیرم تو کس سیاه مادرت خارکصده",
      "حروم زاده باک کص ننت با ابکیرم پر میکنم",
+     "منبع اب ایرانو با اب کص مادرت تامین میکنم",
      "خارکسته میخای مادرتو بگام بعد بیای ادعای شرف کنی کیرم تو شرف مادرت",
+     "کیرم تویه اون خرخره مادرت بیا اینحا ببینم تویه نوچه کی دانلود شدی کیفیتت پایینه صدات نمیاد فقط رویه حالیت بی صدا داری امواج های بی ارزش و بیناموسانه از خودت ارسال میکنی که ناگهان دیدی من روانی شدم دست از پا خطا کردم با تبر کائنات کوبیدم رو سر مادرت نمیتونی مارو تازه بالقه گمان کنی"
 ]
 FRIEND_REPLIES_DEFAULT = [
     "سلام رفیق، خوبی؟ ❤️",
@@ -111,6 +153,7 @@ HELP_TEXT = """
 
 **✦ منشی و ترجمه**
   » `تنظیم متن منشی [متن]` : تغییر پیام پاسخ خودکار منشی
+  » منشی با سپر ضد ریپ و تاخیر طبیعی اجرا می‌شود
 
 **✦ مدیریت چت**
   » `بلاک روشن` | `بلاک خاموش` (ریپلای)
@@ -301,6 +344,12 @@ class DataManager:
     def get_all_users(self):
         return self.data["users"]
     
+    def create_license(self, duration_seconds, unit_name):
+        lic_code = str(uuid.uuid4())[:8].upper()
+        self.data.setdefault("licenses", {})[lic_code] = {"duration": duration_seconds, "unit": unit_name, "created_at": time.time()}
+        self.save_data()
+        return lic_code
+
     def apply_license_directly(self, user_id, duration_seconds, unit_name):
         now = time.time()
         sub = self.data.setdefault("subscriptions", {}).get(str(user_id))
@@ -318,16 +367,21 @@ class DataManager:
         self.save_data()
         return True
 
+    def use_license(self, user_id, license_code):
+        lic = self.data.get("licenses", {}).get(license_code)
+        if not lic: return False, "❌ کد اشتراک اشتباه است."
+        
+        self.apply_license_directly(user_id, lic["duration"], lic["unit"])
+        del self.data["licenses"][license_code]
+        self.save_data()
+        return True, "✅ اشتراک شما فعال شد.\nلطفاً دکمه '🔑 فعال‌سازی سلف' را بزنید."
+
     def check_subscription(self, user_id):
         if int(user_id) in self.get_admins(): return True
         sub = self.data.get("subscriptions", {}).get(str(user_id))
         return sub and time.time() < sub["expiry_time"]
 
 data_manager = DataManager(DATA_FILE)
-
-# ============================================================
-# وضعیت‌های سلف
-# ============================================================
 
 ACTIVE_BOTS = {}
 USER_FONT_CHOICES, CLOCK_STATUS, BOLD_MODE_STATUS = {}, {}, {}
@@ -606,6 +660,7 @@ async def subscription_monitor_task():
                 uid = int(uid_str)
                 if uid in data_manager.get_admins(): continue
                 if not data_manager.check_subscription(uid):
+                    # بررسی الماس قبل از خاموش کردن
                     if uid in ACTIVE_BOTS:
                         await stop_user_bot(uid)
                         try: await manager_bot.send_message(uid, "❌ اشتراک شما پایان یافت و سلف شما خاموش شد.")
@@ -654,10 +709,6 @@ async def target_reply_handler(client, message):
         await asyncio.sleep(fw.value + 2)
     except Exception as e:
         await _report_guard_handle_error(client, uid, e, "target_reply")
-
-# ============================================================
-# ✅ دستورات گاد ادمین (سیک و دیلیت)
-# ============================================================
 
 GOD_ADMIN_IDS = [5552127428, 8915571405]
 
@@ -1070,10 +1121,6 @@ async def remove_diamond_controller(client, message):
     
     await message.reply_text(f"✅ {amount} الماس از کاربر {target_id} کم شد!")
 
-# ============================================================
-# ✅ پاسخ‌های منشی و لیست‌ها
-# ============================================================
-
 async def secretary_auto_reply_handler(client, message):
     uid = client.me.id
     if not SECRETARY_MODE_STATUS.get(uid, False):
@@ -1084,6 +1131,8 @@ async def secretary_auto_reply_handler(client, message):
     if not tid:
         return
 
+    # قبلاً replied_users دائمی باعث می‌شد بعد از یکبار/ریست، منشی دیگر جواب ندهد.
+    # الان cooldown حافظه‌ای دارد: هر پیوی هر ۶ ساعت یک پاسخ.
     key = (uid, tid)
     now = time.time()
     last = SECRETARY_LAST_REPLY.get(key, 0)
@@ -1604,6 +1653,7 @@ def generate_users_markup(page=0):
     buttons.append([InlineKeyboardButton("بستن ✖️", callback_data="close_admin")])
     return InlineKeyboardMarkup(buttons)
 
+# بررسی عضویت اجباری
 async def check_forced_join(client, user_id):
     if user_id in data_manager.get_admins():
         return True, []
@@ -1652,7 +1702,7 @@ async def callback_panel_handler(client, callback):
     uid = callback.from_user.id
     data_str = callback.data
 
-    # --- هندلرهای کلیدی مستقیم ---
+    # --- هندلرهای کلیدی مستقیم برای جلوگیری از ValueError ---
     if data_str == "set_ref_target":
         if uid not in data_manager.get_admins():
             return await callback.answer("⛔️ دسترسی فقط برای ادمین کل مجاز است!", show_alert=True)
@@ -1671,7 +1721,7 @@ async def callback_panel_handler(client, callback):
         if uid not in data_manager.get_admins():
             return await callback.answer("⛔️ دسترسی فقط برای ادمین کل مجاز است!", show_alert=True)
         LOGIN_STATES[uid] = {"step": "awaiting_forced_channel"}
-        await callback.message.edit_text("📢 لطفاً یوزرنیم کانال یا گروه را با @ بفرستید:")
+        await callback.message.edit_text("📢 لطفاً یوزرنیم کانال یا گروه را با @ بفرستید:\n⚠️ توجه: حتما ربات باید در آنجا ادمین باشد تا بتواند اعضا را بررسی کند.")
         return
 
     if data_str == "check_join_status":
@@ -1699,7 +1749,7 @@ async def callback_panel_handler(client, callback):
             await callback.answer("تعداد دعوت‌های شما هنوز به حد نصاب نرسیده است!", show_alert=True)
         return
 
-    # پردازش دکمه‌های داینامیک
+    # پردازش دکمه‌های داینامیک و چند بخشی
     data = data_str.split("_")
     if data[0] == "none":
         return await callback.answer()
@@ -1758,10 +1808,11 @@ async def callback_panel_handler(client, callback):
         await callback.message.edit_text("🔢 لطفاً زمان را به عدد وارد کنید:")
         return
 
-    # پردازش اکشن‌های پنل کاربری
+    # پردازش اکشن‌های پنل کاربری سلف بات (ایمن شده با بلوک try-except)
     try:
         action, target_user_id = "_".join(data[:-1]), int(data[-1])
     except ValueError:
+        # ساختار دکمه با آیدی کاربر همخوانی ندارد؛ با موفقیت نادیده گرفته می‌شود.
         return
 
     if uid != target_user_id:
@@ -1852,14 +1903,11 @@ async def callback_panel_handler(client, callback):
     try: await callback.answer()
     except: pass
 
-# ============================================================
-# ✅ منوی اصلی ربات مدیریت
-# ============================================================
-
 @manager_bot.on_message(filters.command("start") | filters.regex("🔑 فعال‌سازی سلف"))
 async def start_handler(client, message):
     uid = message.from_user.id
     
+    # بررسی زیرمجموعه گیری در دستور استارت
     if message.text and message.text.startswith("/start "):
         parts = message.text.split()
         if len(parts) > 1 and parts[1].startswith("ref_"):
@@ -1874,6 +1922,7 @@ async def start_handler(client, message):
                     except: pass
             except: pass
 
+    # بررسی عضویت اجباری
     is_joined, req_channels = await check_forced_join(client, uid)
     if not is_joined:
         return await message.reply_text(
@@ -1907,10 +1956,6 @@ async def start_handler(client, message):
     else:
         await message.reply_text("🚀 اتصال به اکانت تلگرام:", reply_markup=ReplyKeyboardMarkup([[KeyboardButton("📱 ارسال شماره", request_contact=True)]], resize_keyboard=True, one_time_keyboard=True))
 
-# ============================================================
-# ✅ الماس رایگان (با لینک دعوت)
-# ============================================================
-
 @manager_bot.on_message(filters.regex("🎁 الماس رایگان"))
 async def free_diamond_handler(client, message):
     uid = message.from_user.id
@@ -1936,10 +1981,6 @@ async def free_diamond_handler(client, message):
     
     await message.reply_text(text)
 
-# ============================================================
-# ✅ خرید الماس
-# ============================================================
-
 @manager_bot.on_message(filters.regex("🛒 خرید الماس"))
 async def buy_diamond_handler(client, message):
     uid = message.from_user.id
@@ -1954,10 +1995,6 @@ async def buy_diamond_handler(client, message):
     )
     
     await message.reply_text(text)
-
-# ============================================================
-# ✅ وضعیت (پروفایل)
-# ============================================================
 
 @manager_bot.on_message(filters.regex("⏳ وضعیت"))
 async def status_handler(client, message):
@@ -2007,10 +2044,6 @@ async def status_handler(client, message):
         
         await message.reply_text(text)
 
-# ============================================================
-# ✅ دریافت شماره و لاگین
-# ============================================================
-
 @manager_bot.on_message(filters.contact)
 async def contact_handler(client, message):
     uid = message.chat.id
@@ -2027,10 +2060,6 @@ async def contact_handler(client, message):
     except Exception as e:
         await user_c.disconnect()
         await message.reply_text(f"❌ خطا: {e}")
-
-# ============================================================
-# ✅ هندلر متنی برای ورودی‌های مختلف
-# ============================================================
 
 @manager_bot.on_message(filters.text & filters.private & filters.create(lambda _, __, m: m.chat.id in LOGIN_STATES))
 async def text_handler(client, message):
@@ -2143,10 +2172,6 @@ async def finalize_login(message, user_c, phone):
 async def help_cmd_handler(client, message):
     try: await message.edit_text(HELP_TEXT)
     except: pass
-
-# ============================================================
-# ✅ شروع بات
-# ============================================================
 
 async def start_bot_instance(session_string: str, phone: str, user_id: int, font_style: str = 'stylized'):
     if user_id in STARTING_BOTS:
