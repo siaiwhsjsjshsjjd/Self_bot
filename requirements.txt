@@ -1,2 +1,5 @@
-pyTelegramBotAPI
-telethon
+pyrogram
+aiohttp
+pytz
+cryptg
+tgcrypto
