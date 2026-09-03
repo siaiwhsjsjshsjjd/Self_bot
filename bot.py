@@ -493,18 +493,55 @@ def cmd_start(m: types.Message):
             pass
 
     if in_private(m):
-        text = get_setting("start_text") or "سلام 👋\nبه ربات VIP خوش آمدید 🌟\nاز منو زیر گزینه مورد نظر را انتخاب کنید."
-        photo_id = get_setting("start_photo")
-        markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-        markup.row("≼ سـلـفـ 𝐕𝐢𝐏 ≽", "≼ شـارژ مـوجـودی 💳 ≽")
-        markup.row("≼ الماس رایگان ≽", "≼ پروفایل ≽")
-        if photo_id:
-            try:
-                bot.send_photo(m.chat.id, photo_id, caption=text, reply_markup=markup)
-            except:
-                bot.send_message(m.chat.id, text, reply_markup=markup)
-        else:
-            bot.send_message(m.chat.id, text, reply_markup=markup)
+    text = (
+        "سلام 👋\n"
+        "به ربات VIP خوش آمدید 🌟\n"
+        "از منو زیر گزینه مورد نظر را انتخاب کنید."
+    )
+
+    emoji_entities = [
+        types.MessageEntity(
+            type="custom_emoji",
+            offset=text.index("👋"),
+            length=len("👋"),
+            custom_emoji_id="5994750571041525522"
+        ),
+        types.MessageEntity(
+            type="custom_emoji",
+            offset=text.index("🌟"),
+            length=len("🌟"),
+            custom_emoji_id="5958376256788502078"
+        )
+    ]
+
+    photo_id = get_setting("start_photo")
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    markup.row("≼ سـلـفـ 𝐕𝐢𝐏 ≽", "≼ شـارژ مـوجـودی 💳 ≽")
+    markup.row("≼ الماس رایگان ≽", "≼ پروفایل ≽")
+
+    if photo_id:
+        try:
+            bot.send_photo(
+                m.chat.id,
+                photo_id,
+                caption=text,
+                caption_entities=emoji_entities,
+                reply_markup=markup
+            )
+        except:
+            bot.send_message(
+                m.chat.id,
+                text,
+                entities=emoji_entities,
+                reply_markup=markup
+            )
+    else:
+        bot.send_message(
+            m.chat.id,
+            text,
+            entities=emoji_entities,
+            reply_markup=markup
+        )
 
 # ============================================================
 # ✅ بخش احراز هویت با کد تلگرام
