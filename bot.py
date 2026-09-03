@@ -1,18 +1,27 @@
-import telebot
+from telegram import Update, MessageEntity
+from telegram.ext import Application, CommandHandler, ContextTypes
 
-BOT_TOKEN = "8200221816:AAHN5J-iFXJoQ9mEFLcRBc3ZVDCv2cmrsxQ"
+TOKEN = "8200221816:AAHN5J-iFXJoQ9mEFLcRBc3ZVDCv2cmrsxQ"
+CUSTOM_EMOJI_ID = "5931415565955503486"
 
-bot = telebot.TeleBot(BOT_TOKEN)
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = "سلف درحال ابدیته 🥰"
 
-# شناسه استیکر پریمیوم (بدون فاصله)
-STICKER_ID = "5931415565955503486"
+    entities = [
+        MessageEntity(
+            type="custom_emoji",
+            offset=len("سلف درحال ابدیته ".encode("utf-16-le")) // 2,
+            length=2,
+            custom_emoji_id=CUSTOM_EMOJI_ID
+        )
+    ]
 
-@bot.message_handler(commands=['start'])
-def send_welcome(message):
-    # ارسال متن ساده (بدون فرمت)
-    bot.send_message(message.chat.id, "سلف درحال ابدیته")
-    # ارسال استیکر پریمیوم (به‌عنوان پیام دوم)
-    bot.send_sticker(message.chat.id, STICKER_ID)
+    await update.message.reply_text(
+        text=text,
+        entities=entities
+    )
 
-print("ربات روشن شد!")
-bot.infinity_polling()
+app = Application.builder().token(TOKEN).build()
+app.add_handler(CommandHandler("start", start))
+
+app.run_polling()
