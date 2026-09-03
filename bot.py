@@ -4,12 +4,15 @@ BOT_TOKEN = "8200221816:AAHN5J-iFXJoQ9mEFLcRBc3ZVDCv2cmrsxQ"  # از @BotFather 
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
-STICKER_ID = "5931415565955503486"   # استیکر پریمیوم
+# شناسه استیکر پریمیوم (بدون فاصله)
+STICKER_ID = "5931415565955503486"
 
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
+    # ارسال متن ساده (بدون فرمت)
     bot.send_message(message.chat.id, "سلف درحال ابدیته")
+    # ارسال استیکر پریمیوم
     bot.send_sticker(message.chat.id, STICKER_ID)
 
-print("ربات روشن شد و فقط به /start پاسخ می‌دهد.")
+print("ربات روشن شد!")
 bot.infinity_polling()
