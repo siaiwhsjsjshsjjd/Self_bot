@@ -1,2342 +1,2049 @@
-# -*- coding: utf-8 -*-
-"""
-VIP Bot v19 - نسخه ترکیبی ربات + یوزربات
-"""
-import sqlite3
-import threading
-import html
-import logging
-import time
-import random
 import asyncio
 import os
+import logging
 import re
+import aiohttp
+import time
 import json
-import requests
-from datetime import datetime, timezone, timedelta
+import random
+import uuid
+import gc
+import shutil
+from urllib.parse import quote
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
-import telebot
-from telebot import types
-from pyrogram import Client, filters, enums
-from pyrogram.types import Message as PyroMessage, InlineQueryResultArticle, InputTextMessageContent
-from pyrogram.errors import SessionPasswordNeeded, FloodWait
-from pyrogram.handlers import MessageHandler
+# ============================================================
+# 🛠️ PATCH برای پایتون 3.14 (رفع خطای event loop)
+# ============================================================
 
-# ----------------- CONFIG -----------------
-BOT_TOKEN = "8200221816:AAHN5J-iFXJoQ9mEFLcRBc3ZVDCv2cmrsxQ"
-OWNER_ID = 5552127428
-DEVELOPER_ID = 5552127428
-ADMIN_IDS = [OWNER_ID, DEVELOPER_ID]
+try:
+    loop = asyncio.get_event_loop()
+except RuntimeError:
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
 
-# اطلاعات یوزربات
+# ============================================================
+# ✅ ایمپورت Pyrogram
+# ============================================================
+
+import pyrogram
+from pyrogram import Client, filters, idle
+from pyrogram.handlers import MessageHandler, CallbackQueryHandler
+from pyrogram.enums import ChatType, ChatAction, ChatMembersFilter
+from pyrogram.types import (
+    Message, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove,
+    InlineKeyboardMarkup, InlineKeyboardButton,
+    InlineQueryResultArticle, InputTextMessageContent
+)
+from pyrogram.raw import functions
+from pyrogram.errors import (
+    SessionPasswordNeeded, ChatSendInlineForbidden,
+    AuthKeyUnregistered, UserDeactivated, UserDeactivatedBan, PeerIdInvalid,
+    UserNotParticipant, ChatAdminRequired, BadRequest, FloodWait
+)
+
+logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s - %(message)s')
+
+def patch_peer_id_validation():
+    original_get_peer_type = pyrogram.utils.get_peer_type
+    def patched_get_peer_type(peer_id: int) -> str:
+        try:
+            return original_get_peer_type(peer_id)
+        except ValueError:
+            if str(peer_id).startswith("-100"):
+                return "channel"
+            raise
+    pyrogram.utils.get_peer_type = patched_get_peer_type
+    logging.info("Pyrogram peer ID validation patched successfully.")
+
+patch_peer_id_validation()
+
+class ResilientClient(Client):
+    def __init__(self, *args, **kwargs):
+        kwargs.setdefault("sleep_threshold", 30)
+        kwargs.setdefault("max_concurrent_transmissions", 2)
+        kwargs.setdefault("workers", 2)
+        super().__init__(*args, **kwargs)
+
+    async def invoke(self, *args, **kwargs):
+        try:
+            return await super().invoke(*args, **kwargs)
+        except FloodWait as fw:
+            await asyncio.sleep(fw.value + 2)
+            return await super().invoke(*args, **kwargs)
+
+    async def handle_updates(self, *args, **kwargs):
+        try:
+            await super().handle_updates(*args, **kwargs)
+        except (ValueError, KeyError) as e:
+            msg = str(e)
+            if 'Peer id invalid' in msg or 'ID not found' in msg:
+                return
+            logging.debug(f"ResilientClient minor update error: {msg}")
+        except Exception as e:
+            msg = str(e).lower()
+            if "closed database" in msg or "database is locked" in msg:
+                return
+            logging.warning(f"ResilientClient update skipped: {type(e).__name__}: {e}")
+
+# ----------------- تنظیمات اصلی -----------------
 API_ID = 37386944
 API_HASH = "d64069023db75d11ae5982f653069a98"
-SESSION_NAME = "userbot_session"
-
-# مسیر دیتابیس
-DATA_DIR = os.path.join(os.getcwd(), "data")
-if not os.path.exists(DATA_DIR):
-    os.makedirs(DATA_DIR)
-DB_PATH = os.path.join(DATA_DIR, "vip_bet.db")
-
-DIAMOND_RATE = 40
-REF_BONUS = 40
-BOT_USERNAME = "self_made_iran_bot"
-ACTIVATE_COST = 20
-HOURLY_COST = 2
-# ساعت نام سلف؛ 210 دقیقه یعنی UTC+03:30 (قابل تغییر برای ساعت محل شما)
-CLOCK_UTC_OFFSET_MINUTES = 210
-
-bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML")
-logging.basicConfig(level=logging.INFO)
-db_lock = threading.RLock()
-
-# ----------------- یوزربات / لاگین -----------------
-LOGIN_CLIENTS = {}
-SELF_CLIENTS = {}
-LOGIN_LOOPS = {}
-temp_data = {}
-AUTH_FLOOD_UNTIL = {}  # uid -> unix timestamp; prevents repeated SendCode attempts
-SELF_TASKS = {}
-ADMIN_STATE = {}
-
-# وضعیت‌های runtime سلف (دستورات راهنمای AX)
-BLOCKED_USERS = {}          # uid -> set(user_id)
-MUTED_USERS = {}            # uid -> set((chat_id, user_id))
-AUTO_REACTION_TARGETS = {}  # uid -> {str(user_id): emoji}
-
-# عضویت اجباری ربات (تنظیم‌شده از پنل ادمین)
-def get_forced_channels():
-    raw = get_setting("forced_channels")
-    if not raw:
-        return []
-    try:
-        return json.loads(raw)
-    except Exception:
-        return [x.strip() for x in raw.split(",") if x.strip()]
-
-def set_forced_channels(channels):
-    channels = list(dict.fromkeys([str(x).strip() for x in channels if str(x).strip()]))
-    set_setting("forced_channels", json.dumps(channels, ensure_ascii=False))
-
-def check_forced_join_bot(user_id):
-    """عضویت اجباری را با خود Bot API بررسی می‌کند."""
-    if is_admin(user_id):
-        return True, []
-    channels = get_forced_channels()
-    if not channels:
-        return True, []
-    missing = []
-    for ch in channels:
-        try:
-            member = bot.get_chat_member(ch, user_id)
-            status = getattr(member, "status", "")
-            if status in ("left", "kicked"):
-                missing.append(ch)
-        except Exception as e:
-            logging.warning("forced join check failed for %s: %s", ch, e)
-            missing.append(ch)
-    return (not missing), missing
-
-def forced_join_markup(channels):
-    kb = types.InlineKeyboardMarkup()
-    for ch in channels:
-        username = ch.lstrip("@")
-        kb.add(types.InlineKeyboardButton(f"📢 ورود به {ch}", url=f"https://t.me/{username}"))
-    kb.add(types.InlineKeyboardButton("🔄 بررسی عضویت", callback_data="joincheck"))
-    return kb
-
-LOGIN_LOOP = asyncio.new_event_loop()
-
-def _login_loop_worker():
-    asyncio.set_event_loop(LOGIN_LOOP)
-    LOGIN_LOOP.run_forever()
-
-threading.Thread(target=_login_loop_worker, daemon=True).start()
-
-def run_login_coro(coro):
-    return asyncio.run_coroutine_threadsafe(coro, LOGIN_LOOP)
-
-
-# ----------------- دیتابیس -----------------
-def init_db():
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.executescript("""
-        PRAGMA foreign_keys = ON;
-        CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER PRIMARY KEY,
-            diamonds INTEGER DEFAULT 0,
-            created_at INTEGER,
-            is_self_active INTEGER DEFAULT 0,
-            self_active_time INTEGER DEFAULT 0
-        );
-        CREATE TABLE IF NOT EXISTS settings (
-            key TEXT PRIMARY KEY,
-            value TEXT
-        );
-        CREATE TABLE IF NOT EXISTS referrals (
-            user_id INTEGER PRIMARY KEY,
-            count INTEGER DEFAULT 0
-        );
-        CREATE TABLE IF NOT EXISTS ref_used (
-            user_id INTEGER PRIMARY KEY,
-            referrer_id INTEGER
-        );
-        CREATE TABLE IF NOT EXISTS bets (
-            bet_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            chat_id INTEGER,
-            creator_id INTEGER,
-            amount INTEGER,
-            state TEXT,
-            player_joined_id INTEGER,
-            message_id INTEGER,
-            created_at INTEGER
-        );
-        CREATE TABLE IF NOT EXISTS self_settings (
-            user_id INTEGER PRIMARY KEY,
-            text_mode TEXT DEFAULT 'normal',
-            is_clock_on INTEGER DEFAULT 0,
-            font_style TEXT DEFAULT 'font1',
-            action_mode TEXT DEFAULT 'none',
-            is_auto_reply_on INTEGER DEFAULT 0,
-            auto_reply_text TEXT DEFAULT '',
-            base_first_name TEXT DEFAULT '',
-            base_last_name TEXT DEFAULT '',
-            is_bio_on INTEGER DEFAULT 0,
-            is_seen_on INTEGER DEFAULT 0,
-            is_typing_on INTEGER DEFAULT 0,
-            anti_raid INTEGER DEFAULT 0,
-            tabchi_on INTEGER DEFAULT 0,
-            tabchi_text TEXT DEFAULT 'سلام 👋 پیام شما دریافت شد.'
-        );
-        """)
-        # مهاجرت امن دیتابیس قدیمی؛ هیچ موجودی/کاربری حذف یا تغییر نمی‌شود.
-        cur = conn.cursor()
-        cur.execute("PRAGMA table_info(self_settings)")
-        cols = {row[1] for row in cur.fetchall()}
-        migrations = {
-            'base_first_name': "ALTER TABLE self_settings ADD COLUMN base_first_name TEXT DEFAULT ''",
-            'base_last_name': "ALTER TABLE self_settings ADD COLUMN base_last_name TEXT DEFAULT ''",
-            'is_bio_on': "ALTER TABLE self_settings ADD COLUMN is_bio_on INTEGER DEFAULT 0",
-            'is_seen_on': "ALTER TABLE self_settings ADD COLUMN is_seen_on INTEGER DEFAULT 0",
-            'is_typing_on': "ALTER TABLE self_settings ADD COLUMN is_typing_on INTEGER DEFAULT 0",
-            'anti_raid': "ALTER TABLE self_settings ADD COLUMN anti_raid INTEGER DEFAULT 0",
-            'tabchi_on': "ALTER TABLE self_settings ADD COLUMN tabchi_on INTEGER DEFAULT 0",
-            'tabchi_text': "ALTER TABLE self_settings ADD COLUMN tabchi_text TEXT DEFAULT 'سلام 👋 پیام شما دریافت شد.'",
-        }
-        for col, sql in migrations.items():
-            if col not in cols:
-                cur.execute(sql)
-
-        # امکانات اضافه‌شده از AX
-        extra_cols = {
-            "bold_mode": "ALTER TABLE self_settings ADD COLUMN bold_mode INTEGER DEFAULT 0",
-            "auto_save": "ALTER TABLE self_settings ADD COLUMN auto_save INTEGER DEFAULT 0",
-            "anti_report": "ALTER TABLE self_settings ADD COLUMN anti_report INTEGER DEFAULT 1",
-            "enemy_active": "ALTER TABLE self_settings ADD COLUMN enemy_active INTEGER DEFAULT 0",
-            "friend_active": "ALTER TABLE self_settings ADD COLUMN friend_active INTEGER DEFAULT 0",
-            "crash_active": "ALTER TABLE self_settings ADD COLUMN crash_active INTEGER DEFAULT 0",
-            "pv_lock": "ALTER TABLE self_settings ADD COLUMN pv_lock INTEGER DEFAULT 0",
-            "pv_photo": "ALTER TABLE self_settings ADD COLUMN pv_photo INTEGER DEFAULT 0",
-            "pv_video": "ALTER TABLE self_settings ADD COLUMN pv_video INTEGER DEFAULT 0",
-            "pv_gif": "ALTER TABLE self_settings ADD COLUMN pv_gif INTEGER DEFAULT 0",
-            "pv_voice": "ALTER TABLE self_settings ADD COLUMN pv_voice INTEGER DEFAULT 0",
-            "pv_music": "ALTER TABLE self_settings ADD COLUMN pv_music INTEGER DEFAULT 0",
-            "pv_sticker": "ALTER TABLE self_settings ADD COLUMN pv_sticker INTEGER DEFAULT 0",
-            "pv_doc": "ALTER TABLE self_settings ADD COLUMN pv_doc INTEGER DEFAULT 0",
-            "enemy_list": "ALTER TABLE self_settings ADD COLUMN enemy_list TEXT DEFAULT '[]'",
-            "friend_list": "ALTER TABLE self_settings ADD COLUMN friend_list TEXT DEFAULT '[]'",
-            "crash_list": "ALTER TABLE self_settings ADD COLUMN crash_list TEXT DEFAULT '[]'",
-            "enemy_replies": "ALTER TABLE self_settings ADD COLUMN enemy_replies TEXT DEFAULT '[]'",
-            "friend_replies": "ALTER TABLE self_settings ADD COLUMN friend_replies TEXT DEFAULT '[]'",
-            "crash_replies": "ALTER TABLE self_settings ADD COLUMN crash_replies TEXT DEFAULT '[]'",
-        }
-        for col, sql in extra_cols.items():
-            if col not in cols:
-                cur.execute(sql)
-        conn.commit()
-
-# ----------------- توابع کمکی -----------------
-INFINITE_OWNER_REPR = 10**18
-
-def normalize_digits(value: str) -> str:
-    """تبدیل اعداد فارسی/عربی و حذف فاصله‌ها برای کد ورود تلگرام."""
-    trans = str.maketrans(
-        "۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩",
-        "01234567890123456789"
-    )
-    return value.translate(trans).replace(" ", "").replace("-", "")
-
-def to_superscript(num: str) -> str:
-    """تبدیل اعداد به بالانویس (فونت ۲)"""
-    superscript_map = {
-        '0': '⁰', '1': '¹', '2': '²', '3': '³', '4': '⁴',
-        '5': '⁵', '6': '⁶', '7': '⁷', '8': '⁸', '9': '⁹'
-    }
-    return ''.join(superscript_map.get(c, c) for c in str(num))
-
-def format_clock_by_font(clock: str, font: str) -> str:
-    maps = {
-        'font1': str.maketrans('0123456789:', '0123456789:'),
-        'font2': str.maketrans('0123456789:', '⁰¹²³⁴⁵⁶⁷⁸⁹:'),
-        'font3': str.maketrans('0123456789:', '⓪①②③④⑤⑥⑦⑧⑨:'),
-        'font4': str.maketrans('0123456789:', '０１２３４５６７８９：'),
-        'font5': str.maketrans('0123456789:', '𝟎𝟏𝟐𝟑𝟒𝟓𝟔𝟕𝟖𝟗:'),
-    }
-    return clock.translate(maps.get(font, maps['font1']))
-
-def get_clock_display(user_id: int) -> str:
-    settings = get_self_settings(user_id)
-    now = datetime.now(timezone(timedelta(minutes=CLOCK_UTC_OFFSET_MINUTES)))
-    return format_clock_by_font(now.strftime('%H:%M'), settings.get('font_style', 'font1'))
-
-def ensure_user(uid: int):
-    with db_lock:
-        with sqlite3.connect(DB_PATH) as conn:
-            cur = conn.cursor()
-            cur.execute("INSERT OR IGNORE INTO users(user_id,diamonds,created_at,is_self_active,self_active_time) VALUES(?,?,?,?,?)", 
-                       (uid, 0, int(time.time()), 0, 0))
-            cur.execute("INSERT OR IGNORE INTO referrals(user_id,count) VALUES(?,0)", (uid,))
-            cur.execute("INSERT OR IGNORE INTO self_settings(user_id,text_mode,is_clock_on,font_style,action_mode,is_auto_reply_on,auto_reply_text) VALUES(?,?,?,?,?,?,?)",
-                       (uid, 'normal', 0, 'font1', 'none', 0, ''))
-            conn.commit()
-
-def is_owner(uid: int) -> bool:
-    return uid == OWNER_ID
-
-def get_admin_ids():
-    """لیست ادمین‌ها را از دیتابیس می‌خواند تا بعد از ری‌استارت هم باقی بمانند."""
-    raw = get_setting("admin_ids")
-    base = [OWNER_ID, DEVELOPER_ID]
-    if raw:
-        try:
-            saved = [int(x) for x in json.loads(raw)]
-            base.extend(saved)
-        except Exception:
-            pass
-    return list(dict.fromkeys(base))
-
-def save_admin_ids(ids):
-    ids = [int(x) for x in ids if int(x) != OWNER_ID]
-    set_setting("admin_ids", json.dumps(list(dict.fromkeys(ids))))
-    ADMIN_IDS[:] = list(dict.fromkeys([OWNER_ID, DEVELOPER_ID] + ids))
-
-def is_admin(uid: int) -> bool:
-    return uid in get_admin_ids()
-
-def get_balance(uid: int) -> int:
-    if is_owner(uid):
-        return INFINITE_OWNER_REPR
-    ensure_user(uid)
-    with sqlite3.connect(DB_PATH) as conn:
-        cur = conn.cursor()
-        cur.execute("SELECT diamonds FROM users WHERE user_id=?", (uid,))
-        r = cur.fetchone()
-        return int(r[0]) if r else 0
-
-def set_balance(uid: int, amount: int):
-    if is_owner(uid):
-        return
-    ensure_user(uid)
-    with db_lock:
-        with sqlite3.connect(DB_PATH) as conn:
-            cur = conn.cursor()
-            cur.execute("UPDATE users SET diamonds=? WHERE user_id=?", (int(amount), uid))
-            conn.commit()
-
-def change_balance(uid: int, delta: int):
-    if is_owner(uid):
-        return
-    ensure_user(uid)
-    with db_lock:
-        with sqlite3.connect(DB_PATH) as conn:
-            cur = conn.cursor()
-            cur.execute("UPDATE users SET diamonds = diamonds + ? WHERE user_id=?", (delta, uid))
-            conn.commit()
-
-def is_self_active(uid: int) -> bool:
-    ensure_user(uid)
-    with sqlite3.connect(DB_PATH) as conn:
-        cur = conn.cursor()
-        cur.execute("SELECT is_self_active, self_active_time FROM users WHERE user_id=?", (uid,))
-        r = cur.fetchone()
-        if not r or r[0] == 0:
-            return False
-        current_time = int(time.time())
-        hours_passed = (current_time - r[1]) // 3600
-        if hours_passed > 0:
-            cost = hours_passed * HOURLY_COST
-            bal = get_balance(uid)
-            if bal >= cost:
-                change_balance(uid, -cost)
-                with db_lock:
-                    with sqlite3.connect(DB_PATH) as conn:
-                        cur2 = conn.cursor()
-                        cur2.execute("UPDATE users SET self_active_time=? WHERE user_id=?", (current_time, uid))
-                        conn.commit()
-                return True
-            else:
-                with db_lock:
-                    with sqlite3.connect(DB_PATH) as conn:
-                        cur2 = conn.cursor()
-                        cur2.execute("UPDATE users SET is_self_active=0, self_active_time=0 WHERE user_id=?", (uid,))
-                        conn.commit()
-                return False
-        return True
-
-def activate_self(uid: int):
-    ensure_user(uid)
-    bal = get_balance(uid)
-    if bal < ACTIVATE_COST:
-        return False, "موجودی کافی نیست"
-    change_balance(uid, -ACTIVATE_COST)
-    with db_lock:
-        with sqlite3.connect(DB_PATH) as conn:
-            cur = conn.cursor()
-            cur.execute("UPDATE users SET is_self_active=1, self_active_time=? WHERE user_id=?", (int(time.time()), uid))
-            conn.commit()
-    return True, "سلف شما فعال شد"
-
-def deactivate_self(uid: int):
-    ensure_user(uid)
-    with db_lock:
-        with sqlite3.connect(DB_PATH) as conn:
-            cur = conn.cursor()
-            cur.execute("UPDATE users SET is_self_active=0, self_active_time=0 WHERE user_id=?", (uid,))
-            conn.commit()
-
-def get_self_settings(uid: int):
-    ensure_user(uid)
-    with sqlite3.connect(DB_PATH) as conn:
-        cur = conn.cursor()
-        cur.execute("""SELECT text_mode,is_clock_on,font_style,action_mode,is_auto_reply_on,auto_reply_text,
-                              base_first_name,base_last_name,is_bio_on,is_seen_on,is_typing_on,anti_raid,tabchi_on,tabchi_text,
-                              bold_mode,auto_save,anti_report,enemy_active,friend_active,crash_active,pv_lock,
-                              pv_photo,pv_video,pv_gif,pv_voice,pv_music,pv_sticker,pv_doc,
-                              enemy_list,friend_list,crash_list,enemy_replies,friend_replies,crash_replies
-                       FROM self_settings WHERE user_id=?""", (uid,))
-        r = cur.fetchone()
-        if not r:
-            return {}
-        keys=['text_mode','is_clock_on','font_style','action_mode','is_auto_reply_on','auto_reply_text',
-              'base_first_name','base_last_name','is_bio_on','is_seen_on','is_typing_on','anti_raid','tabchi_on','tabchi_text',
-              'bold_mode','auto_save','anti_report','enemy_active','friend_active','crash_active','pv_lock',
-              'pv_photo','pv_video','pv_gif','pv_voice','pv_music','pv_sticker','pv_doc',
-              'enemy_list','friend_list','crash_list','enemy_replies','friend_replies','crash_replies']
-        d=dict(zip(keys,r))
-        for k in ('enemy_list','friend_list','crash_list','enemy_replies','friend_replies','crash_replies'):
-            try: d[k]=json.loads(d.get(k) or '[]')
-            except Exception: d[k]=[]
-        return d
-
-def set_self_settings(uid: int, key: str, value):
-    ensure_user(uid)
-    with db_lock:
-        with sqlite3.connect(DB_PATH) as conn:
-            cur = conn.cursor()
-            cur.execute(f"UPDATE self_settings SET {key}=? WHERE user_id=?", (value, uid))
-            conn.commit()
-
-def set_setting(key: str, value: str):
-    with db_lock, sqlite3.connect(DB_PATH) as conn:
-        cur = conn.cursor()
-        cur.execute("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",(key,value))
-        conn.commit()
-
-def get_setting(key: str):
-    with sqlite3.connect(DB_PATH) as conn:
-        cur = conn.cursor()
-        cur.execute("SELECT value FROM settings WHERE key=?", (key,))
-        r = cur.fetchone()
-        return r[0] if r else None
-
-def add_referral(referrer_id: int):
-    with db_lock, sqlite3.connect(DB_PATH) as conn:
-        cur = conn.cursor()
-        cur.execute("INSERT INTO referrals(user_id,count) VALUES(?,1) ON CONFLICT(user_id) DO UPDATE SET count=count+1",(referrer_id,))
-        conn.commit()
-
-def get_ref_count(uid: int) -> int:
-    with sqlite3.connect(DB_PATH) as conn:
-        cur = conn.cursor()
-        cur.execute("SELECT count FROM referrals WHERE user_id=?", (uid,))
-        r = cur.fetchone()
-        return int(r[0]) if r else 0
-
-def mark_ref_used(user_id: int, referrer_id: int):
-    with db_lock, sqlite3.connect(DB_PATH) as conn:
-        cur = conn.cursor()
-        cur.execute("INSERT OR IGNORE INTO ref_used(user_id,referrer_id) VALUES(?,?)", (user_id, referrer_id))
-        conn.commit()
-
-def has_used_ref(user_id: int):
-    with sqlite3.connect(DB_PATH) as conn:
-        cur = conn.cursor()
-        cur.execute("SELECT referrer_id FROM ref_used WHERE user_id=?", (user_id,))
-        r = cur.fetchone()
-        return int(r[0]) if r else None
-
-def user_display_from_userobj(u):
-    if not u:
-        return "کاربر"
-    if getattr(u, "username", None):
-        return f"@{u.username}"
-    name = getattr(u, "first_name", None) or "کاربر"
-    return f"<a href='tg://user?id={u.id}'>{html.escape(name)}</a>"
-
-def user_display_from_id(uid: int):
-    try:
-        u = bot.get_chat(uid)
-        return user_display_from_userobj(u)
-    except Exception:
-        if is_owner(uid):
-            return "مالک (∞)"
-        return f"<a href='tg://user?id={uid}'>کاربر</a>"
-
-def in_private(m): return m.chat.type == "private"
-def in_group(m): return m.chat.type in ("group","supergroup")
-
-# ----------------- START -----------------
-@bot.message_handler(commands=['start'])
-def cmd_start(m: types.Message):
-    args = m.text.split()
-    inviter_id = None
-    if len(args) > 1:
-        try:
-            inviter_id = int(args[1])
-        except:
-            inviter_id = None
-    user_id = m.from_user.id
-    ensure_user(user_id)
-
-    # عضویت اجباری قبل از نمایش منوی ربات
-    joined, missing = check_forced_join_bot(user_id)
-    if not joined:
-        bot.send_message(
-            m.chat.id,
-            "⚠️ برای استفاده از ربات ابتدا باید در کانال‌های زیر عضو شوید:",
-            reply_markup=forced_join_markup(missing)
-        )
-        return
-
-    if inviter_id and inviter_id != user_id and not has_used_ref(user_id):
-        change_balance(inviter_id, REF_BONUS)
-        add_referral(inviter_id)
-        mark_ref_used(user_id, inviter_id)
-        try:
-            bot.send_message(user_id, f"<tg-emoji emoji-id='5965433025494782108'> با تشکر از دعوت! به دعوت‌کننده‌ی شما {REF_BONUS} الماس داده شد.", parse_mode="HTML")
-        except:
-            pass
-        try:
-            bot.send_message(inviter_id, f"<tg-emoji emoji-id='5803407823794608400'> یک نفر با لینک دعوت شما وارد ربات شد و {REF_BONUS} الماس به شما داده شد.", parse_mode="HTML")
-        except:
-            pass
-
-    if in_private(m):
-        text = get_setting("start_text") or "سلام <tg-emoji emoji-id='5994750571041525522'>\nبه ربات VIP خوش آمدید <tg-emoji emoji-id='5958376256788502078'>\nاز منو زیر گزینه مورد نظر را انتخاب کنید."
-        photo_id = get_setting("start_photo")
-        markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-        markup.row("≼ سـلـفـ 𝐕𝐢𝐏 ≽", "≼ شـارژ مـوجـودی 💳 ≽")
-        markup.row("≼ الماس رایگان ≽", "≼ پروفایل ≽")
-        if photo_id:
-            try:
-                bot.send_photo(m.chat.id, photo_id, caption=text, reply_markup=markup, parse_mode="HTML")
-            except:
-                bot.send_message(m.chat.id, text, reply_markup=markup, parse_mode="HTML")
-        else:
-            bot.send_message(m.chat.id, text, reply_markup=markup, parse_mode="HTML")
-
-# ============================================================
-# ✅ بخش احراز هویت با کد تلگرام
-# ============================================================
-
-@bot.message_handler(func=lambda m: in_private(m) and m.text and m.text.strip() == "≼ سـلـفـ 𝐕𝐢𝐏 ≽")
-def cmd_self(m: types.Message):
-    uid = m.from_user.id
-    ensure_user(uid)
-
-    if is_self_active(uid):
-        markup = types.InlineKeyboardMarkup()
-        markup.add(types.InlineKeyboardButton("<tg-emoji emoji-id='5879896690210639947'> حذف کردن سلف", callback_data="self:deactivate"))
-        bot.send_message(m.chat.id, "<tg-emoji emoji-id='5803407823794608400'> سلف شما فعال است!\nبرای غیر فعال کردن روی دکمه زیر کلیک کنید.", reply_markup=markup, parse_mode="HTML")
-        return
-
-    balance = get_balance(uid)
-    if balance < ACTIVATE_COST:
-        bot.send_message(
-            m.chat.id,
-            f"<tg-emoji emoji-id='5879896690210639947'> موجودی کافی نیست.\n"
-            f"هزینه فعال‌سازی سلف: {ACTIVATE_COST} الماس\n"
-            f"موجودی شما: {balance} الماس",
-            parse_mode="HTML"
-        )
-        return
-
-    # هزینه فعال‌سازی قبل از شروع لاگین رزرو/کسر می‌شود.
-    change_balance(uid, -ACTIVATE_COST)
-
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
-    markup.add(types.KeyboardButton("📱 ارسال شماره تلفن", request_contact=True))
-    bot.send_message(
-        m.chat.id,
-        f"<tg-emoji emoji-id='5803407823794608400'> {ACTIVATE_COST} الماس از موجودی شما کسر شد.\n\n"
-        "<tg-emoji emoji-id='5874960879434338403'> حالا شماره تلفن خود را ارسال کنید تا کد ورود فرستاده شود.",
-        reply_markup=markup,
-        parse_mode="HTML"
-    )
-
-
-@bot.message_handler(content_types=['contact'])
-def handle_contact(m: types.Message):
-    uid = m.from_user.id
-    ensure_user(uid)
-
-    if not m.contact:
-        return
-    if m.contact.user_id != uid:
-        bot.send_message(m.chat.id, "<tg-emoji emoji-id='5879896690210639947'> لطفاً شماره تلفن خودتان را ارسال کنید.", parse_mode="HTML")
-        return
-
-    phone = m.contact.phone_number
-
-    # Telegram برای درخواست‌های مکرر کد، FloodWait اعمال می‌کند.
-    # قبل از هر درخواست جدید، زمان محدودیت محلی را بررسی می‌کنیم تا دوباره SendCode زده نشود.
-    now = time.time()
-    blocked_until = AUTH_FLOOD_UNTIL.get(uid, 0)
-    if blocked_until > now:
-        remain = int(blocked_until - now)
-        h, rem = divmod(remain, 3600)
-        mm, ss = divmod(rem, 60)
-        bot.send_message(
-            m.chat.id,
-            f"⏳ تلگرام موقتاً ارسال کد برای این حساب را محدود کرده است.\n"
-            f"⏱ زمان باقی‌مانده: {h:02d}:{mm:02d}:{ss:02d}\n\n"
-            "❗️در این مدت دوباره درخواست کد ندهید؛ با تمام شدن زمان محدودیت دوباره شماره را ارسال کنید."
-        )
-        return
-
-    # اگر برای همین کاربر یک نشست کد فعال وجود دارد، درخواست دوم غیرضروری است.
-    existing = temp_data.get(uid)
-    if existing and existing.get("step") in ("code", "password") and LOGIN_CLIENTS.get(uid):
-        bot.send_message(m.chat.id, "📩 یک کد قبلاً برای شما درخواست شده است. همان کد را وارد کنید.")
-        return
-
-    bot.send_message(m.chat.id, f"<tg-emoji emoji-id='5803407823794608400'> شماره شما دریافت شد!\nشماره: {phone}\n\n📤 در حال ارسال درخواست کد به تلگرام...", parse_mode="HTML")
-
-    async def login_start():
-        client = None
-        try:
-            old = LOGIN_CLIENTS.pop(uid, None)
-            if old:
-                try:
-                    await old.disconnect()
-                except Exception:
-                    pass
-
-            client = Client(
-                f"login_{uid}",
-                api_id=API_ID,
-                api_hash=API_HASH,
-                in_memory=True,
-                no_updates=True
-            )
-            await client.connect()
-
-            sent = await client.send_code(phone)
-            LOGIN_CLIENTS[uid] = client
-            temp_data[uid] = {
-                "step": "code",
-                "phone": phone,
-                "phone_code_hash": sent.phone_code_hash,
-                "time": time.time(),
-                "activation_paid": True
-            }
-
-            markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-            markup.row("≼ سـلـفـ 𝐕𝐢𝐏 ≽", "≼ شـارژ مـوجـودی 💳 ≽")
-            markup.row("≼ الماس رایگان ≽", "≼ پروفایل ≽")
-            bot.send_message(
-                uid,
-                "<tg-emoji emoji-id='5803407823794608400'> کد تایید به تلگرام شما ارسال شد.\n📝 لطفاً کد ۵ رقمی را که از تلگرام دریافت کردید را با فاصله وارد کنید مثل  ( 5 4 6 1 2 ) :",
-                reply_markup=markup,
-                parse_mode="HTML"
-            )
-        except FloodWait as e:
-            # این محدودیت از سمت Telegram است و قابل دور زدن نیست.
-            wait_seconds = int(getattr(e, "value", getattr(e, "x", 0)) or 0)
-            if wait_seconds <= 0:
-                wait_seconds = 1
-            AUTH_FLOOD_UNTIL[uid] = time.time() + wait_seconds
-            if client:
-                try:
-                    await client.disconnect()
-                except Exception:
-                    pass
-            LOGIN_CLIENTS.pop(uid, None)
-            state = temp_data.pop(uid, None)
-            if state and state.get("activation_paid"):
-                change_balance(uid, ACTIVATE_COST)
-            h, rem = divmod(wait_seconds, 3600)
-            mm, ss = divmod(rem, 60)
-            bot.send_message(
-                uid,
-                f"⏳ تلگرام ارسال کد را موقتاً محدود کرده است.\n"
-                f"⏱ زمان انتظار: {h:02d}:{mm:02d}:{ss:02d}\n\n"
-                f"<tg-emoji emoji-id='5965433025494782108'> {ACTIVATE_COST} الماس به موجودی شما برگشت داده شد.\n"
-                "❗️لطفاً تا پایان این زمان دوباره درخواست کد ندهید.",
-                parse_mode="HTML"
-            )
-        except Exception as e:
-            if client:
-                try:
-                    await client.disconnect()
-                except Exception:
-                    pass
-            LOGIN_CLIENTS.pop(uid, None)
-            state = temp_data.pop(uid, None)
-            if state and state.get("activation_paid"):
-                change_balance(uid, ACTIVATE_COST)
-                bot.send_message(uid, f"<tg-emoji emoji-id='5879896690210639947'> خطا در ارسال کد: {e}\n<tg-emoji emoji-id='5965433025494782108'> {ACTIVATE_COST} الماس به موجودی شما برگشت داده شد.", parse_mode="HTML")
-            else:
-                bot.send_message(uid, f"<tg-emoji emoji-id='5879896690210639947'> خطا در ارسال کد: {e}", parse_mode="HTML")
-
-    run_login_coro(login_start())
-
-
-# ============================================================
-# 🧊 پنل شیشه‌ای Self VIP (برگرفته از پنل AX)
-# ============================================================
-def _panel_check(uid, value):
-    return "<tg-emoji emoji-id='5803407823794608400'>" if value else "<tg-emoji emoji-id='5879896690210639947'>"
-
-def generate_ax_panel_markup(uid):
-    s = get_self_settings(uid)
-    def c(v): 
-        return "<tg-emoji emoji-id='5803407823794608400'>" if bool(v) else "<tg-emoji emoji-id='5879896690210639947'>"
-    font = s.get("font_style","font1")
-    preview = format_clock_by_font("12:34", font)
-    kb = types.InlineKeyboardMarkup(row_width=3)
-    kb.row(
-        types.InlineKeyboardButton(f"ساعت {c(s.get('is_clock_on'))}", callback_data=f"axp:clock:{uid}"),
-        types.InlineKeyboardButton(f"بولد {c(s.get('bold_mode'))}", callback_data=f"axp:bold:{uid}")
-    )
-    kb.row(types.InlineKeyboardButton(f"تغییر فونت: {preview}", callback_data=f"axp:font:{uid}"))
-    kb.row(
-        types.InlineKeyboardButton(f"منشی {c(s.get('is_auto_reply_on'))}", callback_data=f"axp:reply:{uid}"),
-        types.InlineKeyboardButton(f"سین {c(s.get('is_seen_on'))}", callback_data=f"axp:seen:{uid}")
-    )
-    kb.row(
-        types.InlineKeyboardButton(f"تایپ {c(s.get('is_typing_on'))}", callback_data=f"axp:typing:{uid}"),
-        types.InlineKeyboardButton(f"بازی {c(s.get('action_mode')=='game')}", callback_data=f"axp:action:{uid}")
-    )
-    kb.row(types.InlineKeyboardButton(f"ذخیره خودکار {c(s.get('auto_save'))}", callback_data=f"axp:autosave:{uid}"))
-    kb.row(types.InlineKeyboardButton(f"سپر ضد ریپ {c(s.get('anti_report',1))}", callback_data=f"axp:antireport:{uid}"))
-    kb.row(
-        types.InlineKeyboardButton(f"دشمن {c(s.get('enemy_active'))}", callback_data=f"axp:enemy:{uid}"),
-        types.InlineKeyboardButton(f"دوست {c(s.get('friend_active'))}", callback_data=f"axp:friend:{uid}"),
-        types.InlineKeyboardButton(f"کراش {c(s.get('crash_active'))}", callback_data=f"axp:crash:{uid}")
-    )
-    kb.row(types.InlineKeyboardButton(f"🔒 قفل کل پیوی {c(s.get('pv_lock'))}", callback_data=f"axp:pvlock:{uid}"))
-    kb.row(types.InlineKeyboardButton("🔻 قفل‌های رسانه پیوی 🔻", callback_data="axp:none:"+str(uid)))
-    kb.row(
-        types.InlineKeyboardButton(f"عکس {c(s.get('pv_photo'))}", callback_data=f"axp:media_photo:{uid}"),
-        types.InlineKeyboardButton(f"ویدیو {c(s.get('pv_video'))}", callback_data=f"axp:media_video:{uid}"),
-        types.InlineKeyboardButton(f"گیف {c(s.get('pv_gif'))}", callback_data=f"axp:media_gif:{uid}")
-    )
-    kb.row(
-        types.InlineKeyboardButton(f"ویس {c(s.get('pv_voice'))}", callback_data=f"axp:media_voice:{uid}"),
-        types.InlineKeyboardButton(f"موزیک {c(s.get('pv_music'))}", callback_data=f"axp:media_music:{uid}"),
-        types.InlineKeyboardButton(f"استیکر {c(s.get('pv_sticker'))}", callback_data=f"axp:media_sticker:{uid}")
-    )
-    kb.row(types.InlineKeyboardButton(f"فایل {c(s.get('pv_doc'))}", callback_data=f"axp:media_doc:{uid}"))
-    kb.row(
-        types.InlineKeyboardButton("📊 وضعیت سلف", callback_data=f"axp:status:{uid}"),
-        types.InlineKeyboardButton("🔄 بروزرسانی", callback_data=f"axp:refresh:{uid}")
-    )
-    kb.row(types.InlineKeyboardButton("❌ بستن پنل", callback_data=f"axp:close:{uid}"))
-    return kb
-
-def ax_panel_text(uid):
-    s = get_self_settings(uid)
-    return (
-        "⚡️ <b>مدیریت پیشرفته سلف بات</b>\n"
-        f"👤 کاربر: <code>{uid}</code>\n\n"
-        "📡 وضعیت اتصال: <b>برقرار ✅</b>\n"
-        f"⏰ ساعت: {'روشن <tg-emoji emoji-id='5803407823794608400'>' if s.get('is_clock_on') else 'خاموش <tg-emoji emoji-id='5879896690210639947'>'}\n"
-        f"🔤 فونت ساعت/اسم: <b>{s.get('font_style','font1')}</b>\n"
-        f"📝 حالت متن: <b>{s.get('text_mode','normal')}</b>\n"
-        f"🤖 منشی: {'روشن <tg-emoji emoji-id='5803407823794608400'>' if s.get('is_auto_reply_on') else 'خاموش <tg-emoji emoji-id='5879896690210639947'>'}\n"
-        f"👁 سین: {'روشن <tg-emoji emoji-id='5803407823794608400'>' if s.get('is_seen_on') else 'خاموش <tg-emoji emoji-id='5879896690210639947'>'}\n"
-        f"⌨️ تایپ: {'روشن <tg-emoji emoji-id='5803407823794608400'>' if s.get('is_typing_on') else 'خاموش <tg-emoji emoji-id='5879896690210639947'>'}\n"
-        f"🛡 سپر ضد ریپ: {'روشن <tg-emoji emoji-id='5803407823794608400'>' if s.get('anti_report',1) else 'خاموش <tg-emoji emoji-id='5879896690210639947'>'}\n"
-        f"👤 دشمن/دوست/کراش: {'روشن' if s.get('enemy_active') or s.get('friend_active') or s.get('crash_active') else 'خاموش'}\n"
-        f"🔒 قفل پیوی: {'روشن <tg-emoji emoji-id='5803407823794608400'>' if s.get('pv_lock') else 'خاموش <tg-emoji emoji-id='5879896690210639947'>'}"
-    )
-
-@bot.inline_handler(lambda q: (q.query or '').strip().lower() in ('panel', 'پنل', 'menu', 'منو'))
-def ax_inline_panel(q):
-    uid = q.from_user.id
-    ensure_user(uid)
-    if not is_self_active(uid):
-        return bot.answer_inline_query(
-            q.id, [], cache_time=0, is_personal=True,
-            switch_pm_text="ابتدا سلف را فعال کنید", switch_pm_parameter="start"
-        )
-    result = types.InlineQueryResultArticle(
-        id=f"ax_panel_{uid}",
-        title="🧊 پنل شیشه‌ای سلف",
-        description="پنل حرفه‌ای دستورات سلف",
-        input_message_content=types.InputTextMessageContent(ax_panel_text(uid), parse_mode="HTML"),
-        reply_markup=generate_ax_panel_markup(uid)
-    )
-    bot.answer_inline_query(q.id, [result], cache_time=0, is_personal=True)
-
-@bot.inline_handler(lambda q: (q.query or '').strip().lower() in ('help', 'راهنما'))
-def ax_inline_help(q):
-    uid=q.from_user.id
-    ensure_user(uid)
-    if not is_self_active(uid):
-        return bot.answer_inline_query(q.id, [], cache_time=0, is_personal=True,
-                                       switch_pm_text="ابتدا سلف را فعال کنید", switch_pm_parameter="start")
-    answer_help_inline(q.id, uid)
-
-@bot.callback_query_handler(func=lambda c: c.data and c.data.startswith("axp:"))
-def ax_panel_callback(c):
-    try:
-        uid = c.from_user.id
-        parts = c.data.split(":")
-        action = parts[1]
-        target = int(parts[2])
-        if uid != target:
-            return bot.answer_callback_query(c.id, "⛔️ این پنل برای شما نیست.", show_alert=True)
-        if not is_self_active(uid):
-            return bot.answer_callback_query(c.id, "<tg-emoji emoji-id='5879896690210639947'> سلف شما فعال نیست.", show_alert=True)
-        s = get_self_settings(uid)
-
-        toggle_map = {
-            "clock": "is_clock_on", "reply": "is_auto_reply_on", "bio": "is_bio_on",
-            "seen": "is_seen_on", "typing": "is_typing_on", "antiraid": "anti_raid",
-            "autosave": "auto_save", "antireport": "anti_report",
-            "enemy": "enemy_active", "friend": "friend_active", "crash": "crash_active",
-            "pvlock": "pv_lock", "media_photo": "pv_photo", "media_video": "pv_video",
-            "media_gif": "pv_gif", "media_voice": "pv_voice", "media_music": "pv_music",
-            "media_sticker": "pv_sticker", "media_doc": "pv_doc",
-        }
-        if action in toggle_map:
-            key = toggle_map[action]
-            value = 0 if s.get(key, 0) else 1
-            set_self_settings(uid, key, value)
-            if action == "clock":
-                refresh_clock_profile(uid)
-            run_self_message(uid, f"<tg-emoji emoji-id='5803407823794608400'> {key} {'روشن' if value else 'خاموش'} شد")
-        elif action == "bold":
-            value = 0 if s.get("bold_mode",0) else 1
-            set_self_settings(uid, "bold_mode", value)
-            set_self_settings(uid, "text_mode", "bold" if value else "normal")
-            run_self_message(uid, f"بولد {'روشن' if value else 'خاموش'} شد")
-        elif action in {"quote","spoiler"}:
-            mode = action if s.get("text_mode") != action else "normal"
-            set_self_settings(uid, "text_mode", mode)
-            run_self_message(uid, f"حالت متن: {mode}")
-        elif action == "font":
-            fonts = FONT_KEYS_ORDER
-            cur = s.get("font_style", "font1")
-            value = fonts[(fonts.index(cur)+1) % len(fonts)] if cur in fonts else fonts[0]
-            set_self_settings(uid, "font_style", value)
-            # اگر ساعت روشن است، همین لحظه نام پروفایل را با فونت جدید Refresh کن.
-            # اگر خاموش است، فونت ذخیره می‌شود و با روشن‌کردن ساعت اعمال خواهد شد.
-            ok, err = refresh_clock_profile(uid)
-            preview = format_clock_by_font('12:34', value)
-            if ok:
-                run_self_message(uid, f"🔤 فونت ساعت/اسم به {value} تغییر کرد: {preview}")
-                try:
-                    bot.answer_callback_query(c.id, f"<tg-emoji emoji-id='5803407823794608400'> فونت تغییر کرد: {preview}", show_alert=True)
-                except Exception:
-                    pass
-            else:
-                # ذخیره فونت حتی در صورت قطع‌بودن سلف؛ با Refresh بعدی اعمال می‌شود.
-                try:
-                    bot.answer_callback_query(c.id, f"⚠️ فونت {value} ذخیره شد؛ اتصال سلف برای تغییر اسم برقرار نیست.", show_alert=True)
-                except Exception:
-                    pass
-        elif action == "action":
-            value = "none" if s.get("action_mode") == "game" else "game"
-            set_self_settings(uid, "action_mode", value)
-            run_self_message(uid, f"🎮 بازی {'روشن' if value=='game' else 'خاموش'} شد")
-        elif action == "status":
-            pass
-        elif action == "refresh":
-            refresh_clock_profile(uid)
-        elif action == "none":
-            return bot.answer_callback_query(c.id)
-        elif action == "close":
-            try:
-                bot.edit_message_text("<tg-emoji emoji-id='5879896690210639947'> <b>پنل بسته شد.</b>", inline_message_id=c.inline_message_id, parse_mode="HTML")
-            except Exception:
-                try: bot.delete_message(c.message.chat.id, c.message.message_id)
-                except Exception: pass
-            return bot.answer_callback_query(c.id)
-
-        try:
-            bot.edit_message_text(ax_panel_text(uid), inline_message_id=c.inline_message_id,
-                                  reply_markup=generate_ax_panel_markup(uid), parse_mode="HTML")
-        except Exception:
-            try:
-                bot.edit_message_reply_markup(inline_message_id=c.inline_message_id,
-                                              reply_markup=generate_ax_panel_markup(uid))
-            except Exception:
-                pass
-        bot.answer_callback_query(c.id, "<tg-emoji emoji-id='5803407823794608400'> انجام شد")
-    except Exception as e:
-        logging.exception("AX/CIP panel callback error")
-        try: bot.answer_callback_query(c.id, f"<tg-emoji emoji-id='5879896690210639947'> خطا: {e}", show_alert=True)
-        except Exception: pass
-
-# ================== امکانات واقعی سلف ==================
-def _escape_html(text):
-    return html.escape(str(text), quote=False)
-
-# حروف ساعت تمام فونت‌های استفاده‌شده؛ برای پاک‌کردن ساعت قبلی از اسم
-CLOCK_FONT_CHARS = "0123456789:⁰¹²³⁴⁵⁶⁷⁸⁹ː⓪①②③④⑤⑥⑦⑧⑨∶０１２３４５６７۸９：𝟎𝟏𝟐𝟑𝟒𝟓𝟔𝟕𝟖𝟗𝟘𝟙𝟚𝟛𝟜𝟝𝟞𝟟𝟠𝟡𝟢𝟣𝟤𝟥𝟦𝟧𝟨𝟩𝟪𝟫"
-CLOCK_SUFFIX_RE = re.compile(r"(?:\s*[%s]+)+$" % re.escape(CLOCK_FONT_CHARS))
-
-# فونت‌های ساعت؛ با هر بار زدن دکمه یکی عوض می‌شود.
-FONT_STYLES = {
-    "font1": str.maketrans("0123456789:", "0123456789:"),
-    "font2": str.maketrans("0123456789:", "⁰¹²³⁴⁵⁶⁷⁸⁹ː"),
-    "font3": str.maketrans("0123456789:", "⓪①②③④⑤⑥⑦⑧⑨∶"),
-    "font4": str.maketrans("0123456789:", "０１２３４５６７８９："),
-    "font5": str.maketrans("0123456789:", "𝟎𝟏𝟐𝟑𝟒𝟓𝟔𝟕𝟖𝟗:"),
-    "font6": str.maketrans("0123456789:", "𝟘𝟙𝟚𝟛𝟜𝟝𝟞𝟟𝟠𝟡:"),
-    "font7": str.maketrans("0123456789:", "𝟢𝟣𝟤𝟥𝟦𝟧𝟨𝟩𝟪𝟫:"),
-}
-FONT_KEYS_ORDER = list(FONT_STYLES)
-
-HELP_TEXT = """[ 🛠 راهنمای پیشرفته سلف بات ]
-━━━━━━━━━━━━━━━━━━━━
-⚠️ توجه: تمامی تنظیمات روشن/خاموش (قفل‌های پیوی، ذخیره‌ها، منشی، ساعت و...) فقط از طریق دستور «پنل» قابل کنترل هستند.
-
-✦ ابزار و مدیریت
-» <code>تگ</code> یا <code>tagall</code> : تگ کردن همه اعضای گروه
-» <code>تگ ادمین ها</code> : تگ کردن ادمین‌ها
-» <code>دانلود</code> (ریپلای) : دانلود فایل رسانه
-» <code>ذخیره</code> (ریپلای) : ذخیره کامل مدیا و فایل در سیو مسیج
-» <code>بن</code> (ریپلای) : بن کردن کاربر از گروه
-» <code>پین</code> / <code>آن پین</code> (ریپلای) : پین کردن پیام
-» <code>اسپم [متن] [تعداد]</code> : ارسال پشت سر هم پیام
-» <code>فلود [متن] [تعداد]</code> : ارسال پیام طولانی
-» <code>حذف [تعداد]</code> یا <code>حذف همه</code> : پاک کردن پیام‌های خودتان
-» <code>ping</code> یا <code>پینگ</code> : تست سرعت پاسخ سلف
-» <code>تکرار [تعداد]</code> (ریپلای) : تکرار یک پیام
-
-✦ پنل و تنظیمات
-» <code>پنل</code> : باز کردن پنل شیشه‌ای
-» <code>تغییر فونت</code> : تغییر فونت ساعت اسم
-» <code>راهنما</code> : نمایش همین راهنما
-» <code>/admin</code> : پنل مدیریت مالک/ادمین
-
-✦ منشی و ترجمه
-» <code>تنظیم متن منشی [متن]</code> : تغییر پیام پاسخ خودکار منشی
-» منشی با سپر ضد ریپ و تأخیر طبیعی اجرا می‌شود
-
-✦ مدیریت چت
-» <code>بلاک روشن</code> | <code>بلاک خاموش</code> (ریپلای)
-» <code>سکوت روشن</code> | <code>سکوت خاموش</code> (ریپلای)
-» <code>ریاکشن [شکلک]</code> | <code>ریاکشن خاموش</code> (ریپلای)
-
-✦ لیست‌ها (دشمن، دوست، کراش)
-» <code>تنظیم دشمن</code> | <code>تنظیم دوست</code> | <code>تنظیم کراش</code> (ریپلای)
-» <code>حذف دشمن</code> | <code>حذف دوست</code> | <code>حذف کراش</code> (ریپلای)
-» <code>لیست دشمن</code> | <code>لیست دوست</code> | <code>لیست کراش</code>
-» <code>پاکسازی لیست دشمن</code> | <code>پاکسازی لیست دوست</code> | <code>پاکسازی لیست کراش</code>
-» <code>تنظیم متن دشمن [متن]</code> | <code>تنظیم متن دوست [متن]</code> | <code>تنظیم متن کراش [متن]</code>
-» <code>حذف متن دشمن [عدد]</code> | <code>حذف متن دوست [عدد]</code> | <code>حذف متن کراش [عدد]</code>
-
-✦ سرگرمی و انیمیشن
-» <code>fun love</code> | <code>fun oclock</code> | <code>fun star</code>
-» <code>fun snow</code> | <code>fun moon</code> | <code>fun fire</code> | <code>fun loading</code> | <code>fun bomb</code>
-» <code>قلب</code> یا <code>heart</code> | <code>قلب خالی</code> یا <code>emptyheart</code>
-» <code>تایپ</code> یا <code>typing</code> | <code>پروگرس</code> یا <code>progress</code>
-» <code>موج</code> یا <code>wave</code> | <code>ضربان</code> یا <code>pulse</code>
-━━━━━━━━━━━━━━━━━━━━"""
-
-# جایگزین تابع قدیمی تا همه فونت‌ها یکسان کار کنند.
-def format_clock_by_font(clock: str, font: str) -> str:
-    return clock.translate(FONT_STYLES.get(font, FONT_STYLES["font1"]))
-
-HELP_COPY_COMMANDS = [
-    "تگ", "tagall", "تگ اعضا", "تگ اعضا گروه", "تگ ادمین ها", "تگ ادمینا",
-    "دانلود", "ذخیره", "بن", "پین", "آن پین", "اسپم [متن] [تعداد]", "فلود [متن] [تعداد]",
-    "حذف [تعداد]", "حذف همه", "ping", "پینگ", "تکرار [تعداد]",
-    "تنظیم متن منشی [متن]", "بلاک روشن", "بلاک خاموش", "سکوت روشن", "سکوت خاموش",
-    "ریاکشن ❤️", "ریاکشن خاموش",
-    "تنظیم دشمن", "حذف دشمن", "لیست دشمن", "پاکسازی لیست دشمن", "تنظیم متن دشمن [متن]", "حذف متن دشمن [عدد]",
-    "تنظیم دوست", "حذف دوست", "لیست دوست", "پاکسازی لیست دوست", "تنظیم متن دوست [متن]", "حذف متن دوست [عدد]",
-    "تنظیم کراش", "حذف کراش", "لیست کراش", "پاکسازی لیست کراش", "تنظیم متن کراش [متن]", "حذف متن کراش [عدد]",
-    "fun love", "fun oclock", "fun star", "fun snow", "fun moon", "fun fire", "fun loading", "fun bomb",
-    "قلب", "heart", "قلب خالی", "emptyheart", "تایپ", "typing", "پروگرس", "progress", "موج", "wave", "ضربان", "pulse",
-    "پنل", "تغییر فونت", "راهنما", "/admin",
+BOT_TOKEN = "8678881387:AAFJ6GDC3ehkRl9WPg5WR6odCQTCR69IJ50"
+
+ROOT_ADMIN = 5552127428
+DATA_FILE = "bot_data_finalxxx.json"
+# ------------------------------------------------
+
+TEHRAN_TIMEZONE = ZoneInfo("Asia/Tehran")
+LOGIN_STATES = {}
+HTTP_SESSION = None
+STARTING_BOTS = set()
+RECENT_CHATS = {}
+SESSION_START_THROTTLE = {}
+REPORT_GUARD_UNTIL = {}
+REPORT_GUARD_EVENTS = {}
+STARTUP_CONCURRENCY = max(4, min(24, int(os.getenv("AX_STARTUP_CONCURRENCY", "12"))))
+
+# متون پیش‌فرض دشمن، دوست، کراش
+ENEMY_REPLIES_DEFAULT = [
+     "کیرم تو رحم اجاره ای و خونی مالی مادرت",
+     "دو میلیون شبی پول ویلا بدم تا مادرتو تو گوشه کناراش بگام و اب کوسشو بریزم کف خونه تا فردا صبح کارگرای افغانی برای نظافت اومدن با بوی اب کس مادرت بجقن و ابکیراشون نثار قبر مرده هات بشه",
+     "احمق مادر کونی من کس مادرت گذاشتم تو بازم داری کسشر میگی",
+     "هی بیناموس کیرم بره تو کس ننت واس بابات نشآخ مادر کیری کیرم بره تو کس اجدادت کسکش بیناموس کس ول نسل شوتی ابجی کسده کیرم تو کس مادرت بیناموس کیری کیرم تو کس نسل ابجی کونی کس نسل سگ ممبر کونی ابجی سگ ممبر سگ کونی کیرم تو کس ننت کیر تو کس مادرت کیر خاندان تو کس نسل مادر کونی ابجی کونی کیری ناموس ابجیتو گاییدم سگ حرومی خارکسه مادر کیری با کیر بزنم تو رحم مادرت ناموستو بگام لاشی کونی ابجی کس خیابونی مادرخونی ننت کیرمو میماله تو میای کص میگی شاخ نشو ییا ببین شاخو کردم تو کون ابجی جندت کس ابجیتو پاره کردم تو شاخ میشی اوبی",
+     "کیرم تو کس سیاه مادرت خارکصده",
+     "حروم زاده باک کص ننت با ابکیرم پر میکنم",
+     "منبع اب ایرانو با اب کص مادرت تامین میکنم",
+     "خارکسته میخای مادرتو بگام بعد بیای ادعای شرف کنی کیرم تو شرف مادرت",
+     "کیرم تویه اون خرخره مادرت بیا اینحا ببینم تویه نوچه کی دانلود شدی کیفیتت پایینه صدات نمیاد فقط رویه حالیت بی صدا داری امواج های بی ارزش و بیناموسانه از خودت ارسال میکنی که ناگهان دیدی من روانی شدم دست از پا خطا کردم با تبر کائنات کوبیدم رو سر مادرت نمیتونی مارو تازه بالقه گمان کنی"
+]
+FRIEND_REPLIES_DEFAULT = [
+    "سلام رفیق، خوبی؟ ❤️",
+    "جانم بفرما؟",
+    "عزیزی داداش/آبجی."
+]
+CRASH_REPLIES_DEFAULT = [
+    "سلام عشقم خوبی؟ 😍",
+    "جونم بفرما؟ 💕",
+    "دلتنگت بودم..."
 ]
 
-def _copy_keyboard_raw():
-    # Bot API CopyTextButton: با یک لمس متن دقیقاً در کلیپ‌بورد کپی می‌شود.
-    rows=[]
-    for i in range(0, len(HELP_COPY_COMMANDS), 2):
-        row=[]
-        for text in HELP_COPY_COMMANDS[i:i+2]:
-            row.append({"text": f"📋 {text}", "copy_text": {"text": text}})
-        rows.append(row)
-    return {"inline_keyboard": rows}
+DEFAULT_SECRETARY_MESSAGE = "سلام! در حال حاضر آفلاین هستم و پیام شما را دریافت کردم. در اولین فرصت پاسخ خواهم داد."
 
-def _raw_bot_call(method, payload):
-    try:
-        r=requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/{method}", json=payload, timeout=20)
-        data=r.json()
-        if not data.get("ok"):
-            logging.warning("Bot API %s failed: %s", method, data)
-        return data
-    except Exception as e:
-        logging.exception("Bot API %s error", method)
-        return {"ok": False, "description": str(e)}
+FONT_STYLES = {
+    "cursive":      {'0':'𝟎','1':'𝟏','2':'𝟐','3':'𝟑','4':'𝟒','5':'𝟓','6':'𝟔','7':'𝟕','8':'𝟖','9':'𝟗',':':':'},
+    "stylized":     {'0':'𝟬','1':'𝟭','2':'𝟮','3':'𝟯','4':'𝟰','5':'𝟱','6':'𝟲','7':'𝟳','8':'𝟴','9':'𝟵',':':':'},
+    "doublestruck": {'0':'𝟘','1':'𝟙','2':'𝟚','3':'𝟛','4':'𝟜','5':'𝟝','6':'𝟞','7':'𝟟','8':'𝟠','9':'𝟡',':':':'},
+    "monospace":    {'0':'𝟶','1':'𝟷','2':'𝟸','3':'𝟹','4':'𝟺','5':'𝟻','6':'𝟼','7':'𝟽','8':'𝟾','9':'𝟿',':':':'},
+    "normal":       {'0':'0','1':'1','2':'2','3':'3','4':'4','5':'5','6':'6','7':'7','8':'8','9':'9',':':':'},
+    "circled":      {'0':'⓪','1':'①','2':'②','3':'③','4':'④','5':'⑤','6':'⑥','7':'⑦','8':'⑧','9':'⑨',':':'∶'},
+}
+FONT_KEYS_ORDER = list(FONT_STYLES.keys())
+ALL_CLOCK_CHARS = "".join(set(char for font in FONT_STYLES.values() for char in font.values()))
+CLOCK_CHARS_REGEX_CLASS = f"[{re.escape(ALL_CLOCK_CHARS)}]"
 
-def send_help_copy_message(chat_id):
-    return _raw_bot_call("sendMessage", {
-        "chat_id": chat_id,
-        "text": HELP_TEXT,
-        "parse_mode": "HTML",
-        "disable_web_page_preview": True,
-        "reply_markup": _copy_keyboard_raw(),
-    })
+HELP_TEXT = """
+**[ 🛠 راهنمای پیشرفته سلف بات ]**
+━━━━━━━━━━━━━━━━━━━━
+⚠️ **توجه:** تمامی تنظیمات روشن/خاموش (قفل‌های پیوی، ذخیره‌ها، منشی، ساعت و...) **فقط از طریق دستور `پنل`** قابل کنترل هستند.
 
-def answer_help_inline(query_id, uid):
-    result={
-        "type":"article",
-        "id":f"cip_help_{uid}",
-        "title":"📋 راهنمای سلف — کپی با یک لمس",
-        "description":"روی هر دستور بزن تا همان متن کپی شود.",
-        "input_message_content":{
-            "message_text":HELP_TEXT,
-            "parse_mode":"HTML",
-            "disable_web_page_preview":True,
-        },
-        "reply_markup":_copy_keyboard_raw(),
-    }
-    return _raw_bot_call("answerInlineQuery", {
-        "inline_query_id":query_id,
-        "results":[result],
-        "cache_time":0,
-        "is_personal":True,
-    })
+**✦ ابزار و مدیریت**
+  » `تگ` یا `tagall` : تگ کردن همه اعضای گروه
+  » `تگ ادمین ها` : تگ کردن ادمین‌ها
+  » `دانلود` (ریپلای) : دانلود فایل رسانه
+  » `ذخیره` (ریپلای) : ذخیره کامل مدیا و فایل در سیو مسیج
+  » `بن` (ریپلای) : بن کردن کاربر از گروه
+  » `پین` / `آن پین` (ریپلای) : پین کردن پیام
+  » `اسپم [متن] [تعداد]` : ارسال پشت سر هم پیام
+  » `فلود [متن] [تعداد]` : ارسال پیام طولانی
+  » `حذف [تعداد]` یا `حذف همه` : پاک کردن پیام‌های خودتان
+  » `ping` یا `پینگ` : تست سرعت پاسخ سلف
+  » `تکرار [تعداد]` (ریپلای) : تکرار یک پیام
 
-def _clean_clock_from_name(name: str) -> str:
-    return CLOCK_SUFFIX_RE.sub("", name or "").strip()
+**✦ منشی و ترجمه**
+  » `تنظیم متن منشی [متن]` : تغییر پیام پاسخ خودکار منشی
+  » منشی با سپر ضد ریپ و تاخیر طبیعی اجرا می‌شود
 
-def get_clock_display(user_id: int) -> str:
-    settings = get_self_settings(user_id)
-    now = datetime.now(timezone(timedelta(minutes=CLOCK_UTC_OFFSET_MINUTES)))
-    return format_clock_by_font(now.strftime('%H:%M'), settings.get('font_style', 'font1'))
+**✦ مدیریت چت**
+  » `بلاک روشن` | `بلاک خاموش` (ریپلای)
+  » `سکوت روشن` | `سکوت خاموش` (ریپلای)
+  » `ریاکشن [شکلک]` | `ریاکشن خاموش` (ریپلای)
 
-def refresh_clock_profile(uid):
-    """نام پروفایل را فوراً با فونت انتخاب‌شده به‌روزرسانی می‌کند."""
-    client = SELF_CLIENTS.get(uid) or LOGIN_CLIENTS.get(uid)
-    if not client:
-        return False, "سلف متصل نیست."
+**✦ لیست‌ها (دشمن، دوست، کراش)**
+  » `تنظیم دشمن` | `تنظیم دوست` | `تنظیم کراش` (ریپلای)
+  » `حذف دشمن` | `حذف دوست` | `حذف کراش` (ریپلای)
+  » `لیست دشمن` | `لیست دوست` | `لیست کراش`
+  » `پاکسازی لیست دشمن` | `پاکسازی لیست دوست` | `پاکسازی لیست کراش`
+  » `تنظیم متن دشمن [متن]` | `تنظیم متن دوست [متن]` | `تنظیم متن کراش [متن]`
+  » `حذف متن دشمن [عدد]` | `حذف متن دوست [عدد]` | `حذف متن کراش [عدد]`
 
-    async def _refresh():
-        s = get_self_settings(uid)
-        me = await client.get_me()
-        current_first = me.first_name or ""
-        # همیشه نام پایه را از مقدار ذخیره‌شده می‌گیریم و ساعت قبلی را پاک می‌کنیم.
-        base = _clean_clock_from_name(s.get("base_first_name") or current_first)
-        base = base.strip() or "Self"
-        if not s.get("base_first_name") or _clean_clock_from_name(s.get("base_first_name")) != base:
-            set_self_settings(uid, "base_first_name", base)
-        last_name = s.get("base_last_name") or me.last_name or ""
-        if s.get("is_clock_on"):
-            display = get_clock_display(uid)
-            new_first = f"{base} {display}".strip()
-        else:
-            new_first = base
-        await client.update_profile(first_name=new_first[:64], last_name=last_name[:64])
-        return new_first
+**✦ سرگرمی و انیمیشن**
+  » `fun love` | `fun oclock` | `fun star` | `fun snow` | `fun moon` | `fun fire` | `fun loading` | `fun bomb`
+  » `قلب` یا `heart` | `قلب خالی` یا `emptyheart`
+  » `تایپ` یا `typing` | `پروگرس` یا `progress`
+  » `موج` یا `wave` | `ضربان` یا `pulse`
+━━━━━━━━━━━━━━━━━━━━
+"""
 
-    try:
-        fut = run_login_coro(_refresh())
-        fut.result(timeout=12)
-        return True, "انجام شد"
-    except Exception as e:
-        logging.warning("refresh clock failed for %s: %s", uid, e)
-        return False, str(e)
-
-async def _apply_text_style(message, uid):
-    if not message.text or message.text.strip().lower() in {"پنل", "panel", "/panel"}:
-        return
-    s = get_self_settings(uid)
-    mode = s.get("text_mode", "normal")
-    raw = message.text
-    if mode == "normal":
-        return
-    try:
-        if mode == "bold":
-            await message.edit_text(f"<b>{_escape_html(raw)}</b>", parse_mode=enums.ParseMode.HTML)
-        elif mode == "quote":
-            await message.edit_text(f"<blockquote>{_escape_html(raw)}</blockquote>", parse_mode=enums.ParseMode.HTML)
-        elif mode == "spoiler":
-            await message.edit_text(f"<tg-spoiler>{_escape_html(raw)}</tg-spoiler>", parse_mode=enums.ParseMode.HTML)
-    except Exception:
-        pass
-
-async def _clock_loop(client, uid):
-    try:
-        me = await client.get_me()
-        s = get_self_settings(uid)
-        base = _clean_clock_from_name(s.get("base_first_name") or me.first_name or "")
-        if not s.get("base_first_name") or s.get("base_first_name") != base:
-            set_self_settings(uid, "base_first_name", base)
-        if not s.get("base_last_name"):
-            set_self_settings(uid, "base_last_name", me.last_name or "")
-        while is_self_active(uid):
-            s = get_self_settings(uid)
-            base = _clean_clock_from_name(s.get("base_first_name") or me.first_name or "")
-            target_name = f"{base} {get_clock_display(uid)}".strip() if s.get("is_clock_on") else base
+class DataManager:
+    def __init__(self, file_path):
+        self.file_path = file_path
+        self.tmp_path = f"{file_path}.tmp"
+        self.backup_path = f"{file_path}.bak"
+        self._needs_save = False
+        self._last_save = 0.0
+        self.data = self.load_data()
+    
+    def load_data(self):
+        if os.path.exists(self.file_path):
             try:
-                current = await client.get_me()
-                if (current.first_name or "") != target_name:
-                    await client.update_profile(first_name=target_name, last_name=s.get("base_last_name") or current.last_name or "")
-            except Exception as e:
-                logging.debug("clock profile update failed for %s: %s", uid, e)
-            await asyncio.sleep(30)
-    except asyncio.CancelledError:
-        return
-    except Exception:
-        logging.exception("clock loop stopped for %s", uid)
-
-async def _incoming_features(client, message, uid):
-    if not message.from_user or message.from_user.is_bot or message.outgoing:
-        return
-    sender_id = message.from_user.id
-    chat_id = message.chat.id if message.chat else 0
-    s = get_self_settings(uid)
-
-    # ریاکشن خودکار روی شخص مشخص‌شده
-    # از دیتابیس هم بازیابی می‌کنیم تا بعد از ری‌استارت سلف تنظیمات از بین نرود.
-    reactions = AUTO_REACTION_TARGETS.setdefault(uid, {})
-    # هر بار از دیتابیس هم همگام می‌کنیم؛ این کار باعث می‌شود تنظیم قدیمی بعد از restart جا نماند.
-    try:
-        raw = get_setting(f"auto_reactions_{uid}")
-        if raw:
-            saved = json.loads(raw)
-            if isinstance(saved, dict):
-                reactions.update({str(k): str(v) for k, v in saved.items() if v})
-    except Exception:
-        logging.exception("failed to load auto reactions for %s", uid)
-    emoji = reactions.get(str(sender_id))
-    if emoji:
-        ok=False
-        for fn in (
-            lambda: client.send_reaction(chat_id=chat_id, message_id=message.id, emoji=emoji),
-            lambda: message.react(emoji=emoji),
-        ):
-            try:
-                await fn(); ok=True; break
-            except Exception as e:
-                logging.warning("auto reaction attempt failed uid=%s sender=%s chat=%s emoji=%s: %s", uid, sender_id, chat_id, emoji, e)
-        if not ok:
-            logging.warning("auto reaction failed permanently uid=%s sender=%s", uid, sender_id)
-
-    # سکوت: پیام‌های شخص در چت مشخص حذف می‌شوند.
-    if (chat_id, sender_id) in MUTED_USERS.get(uid, set()):
-        try: await message.delete()
-        except Exception: pass
-        return
-
-    # قفل کل پیوی و قفل رسانه‌ها
-    if message.chat and message.chat.type == enums.ChatType.PRIVATE:
-        should_delete = bool(s.get("pv_lock"))
-        if getattr(message, "photo", None) and s.get("pv_photo"): should_delete = True
-        if getattr(message, "video", None) and s.get("pv_video"): should_delete = True
-        if getattr(message, "animation", None) and s.get("pv_gif"): should_delete = True
-        if getattr(message, "voice", None) and s.get("pv_voice"): should_delete = True
-        if getattr(message, "audio", None) and s.get("pv_music"): should_delete = True
-        if getattr(message, "sticker", None) and s.get("pv_sticker"): should_delete = True
-        if getattr(message, "document", None) and s.get("pv_doc"): should_delete = True
-        if should_delete:
-            try: await message.delete()
-            except Exception: pass
-            return
-        if s.get("is_seen_on"):
-            try: await client.read_chat_history(message.chat.id)
-            except Exception: pass
-
-    # دشمن/دوست/کراش در پیوی و گروه
-    kind = None
-    if sender_id in (s.get("enemy_list") or []) and s.get("enemy_active"): kind = "enemy"
-    elif sender_id in (s.get("friend_list") or []) and s.get("friend_active"): kind = "friend"
-    elif sender_id in (s.get("crash_list") or []) and s.get("crash_active"): kind = "crash"
-    if kind:
-        key = f"{kind}_replies"
-        defaults = {
-            "enemy": ["⚠️ پیام شما دریافت شد."],
-            "friend": ["سلام رفیق ❤️", "جانم؟"],
-            "crash": ["سلام ❤️", "جانم بفرما؟"]
+                with open(self.file_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    self._ensure_structure(data)
+                    return data
+            except Exception:
+                return self.get_default_data()
+        return self.get_default_data()
+    
+    def _ensure_structure(self, data):
+        if "settings" not in data:
+            data["settings"] = {"ref_target": 0, "ref_days": 0, "forced_channels": []}
+        for u in data.get("users", {}).values():
+            if "referrals" not in u: u["referrals"] = []
+    
+    def get_default_data(self):
+        return {
+            "users": {}, "sessions": {}, "licenses": {}, "subscriptions": {}, 
+            "admins": [ROOT_ADMIN],
+            "settings": {"ref_target": 0, "ref_days": 0, "forced_channels": []}
         }
-        replies = s.get(key) or defaults[kind]
+    
+    def save_data(self):
+        self._needs_save = True
+        if time.time() - self._last_save > 8:
+            return self.force_save_sync()
+        return True
+
+    def force_save_sync(self):
         try:
-            if s.get("is_typing_on"):
-                await client.send_chat_action(chat_id, enums.ChatAction.TYPING)
-                await asyncio.sleep(0.6)
-            await message.reply_text(random.choice(replies))
-        except Exception: pass
-        return
+            if os.path.exists(self.file_path) and os.path.getsize(self.file_path) > 10:
+                try: shutil.copy2(self.file_path, self.backup_path)
+                except Exception: pass
+            with open(self.tmp_path, 'w', encoding='utf-8') as f:
+                json.dump(self.data, f, ensure_ascii=False, separators=(",", ":"))
+            os.replace(self.tmp_path, self.file_path)
+            self._last_save = time.time()
+            self._needs_save = False
+            return True
+        except Exception as e:
+            logging.error(f"Database save failed: {e}")
+            self._needs_save = True
+            return False
 
-    # منشی فقط پیوی
-    if message.chat and message.chat.type == enums.ChatType.PRIVATE and (s.get("is_auto_reply_on") or s.get("tabchi_on")):
-        reply_text = s.get("auto_reply_text") if s.get("is_auto_reply_on") else s.get("tabchi_text")
-        reply_text = reply_text or "سلام 👋 پیام شما دریافت شد."
-        try:
-            if s.get("is_typing_on"):
-                await client.send_chat_action(message.chat.id, enums.ChatAction.TYPING)
-                await asyncio.sleep(1)
-            await message.reply_text(reply_text)
-        except Exception: pass
-
-async def _safe_delete(message):
-    try: await message.delete()
-    except Exception: pass
-
-async def _tag_members(client, message, admins=False):
-    if not message.chat or message.chat.type not in (enums.ChatType.GROUP, enums.ChatType.SUPERGROUP):
-        return await message.reply_text("❌ این دستور فقط داخل گروه یا سوپرگروه کار می‌کند.")
-    tags=[]
-    try:
-        if admins:
+    async def auto_save_loop(self):
+        while True:
             try:
-                iterator = client.get_chat_members(message.chat.id, filter=enums.ChatMembersFilter.ADMINISTRATORS)
-                async for member in iterator:
-                    u=member.user
-                    if not u or u.is_bot or u.is_deleted:
-                        continue
-                    name=((u.first_name or "کاربر") + (" " + u.last_name if u.last_name else "")).strip()
-                    tags.append(f'<a href="tg://user?id={u.id}">{_escape_html(name)}</a>')
-            except Exception as first_error:
-                logging.warning("admin filter failed, using status fallback: %s", first_error)
-                iterator = client.get_chat_members(message.chat.id, limit=500)
-                async for member in iterator:
-                    status=str(getattr(member, "status", "")).lower()
-                    if status not in {"administrator", "owner", "creator", "chatmembersstatus.administrator", "chatmembersstatus.owner"}:
-                        continue
-                    u=member.user
-                    if not u or u.is_bot or u.is_deleted:
-                        continue
-                    name=((u.first_name or "کاربر") + (" " + u.last_name if u.last_name else "")).strip()
-                    tags.append(f'<a href="tg://user?id={u.id}">{_escape_html(name)}</a>')
+                await asyncio.sleep(30)
+                if self._needs_save:
+                    await asyncio.get_event_loop().run_in_executor(None, self.force_save_sync)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logging.error(f"Auto save error: {e}")
+    
+    def get_admins(self):
+        return self.data.get("admins", [ROOT_ADMIN])
+        
+    def add_admin(self, admin_id):
+        admins = self.get_admins()
+        if admin_id not in admins:
+            admins.append(admin_id)
+            self.data["admins"] = admins
+            self.save_data()
+            return True
+        return False
+        
+    def remove_admin(self, admin_id):
+        admins = self.get_admins()
+        if admin_id in admins and admin_id != ROOT_ADMIN:
+            admins.remove(admin_id)
+            self.data["admins"] = admins
+            self.save_data()
+            return True
+        return False
+
+    def get_global_settings(self):
+        return self.data.get("settings", {"ref_target": 0, "ref_days": 0, "forced_channels": []})
+        
+    def update_global_settings(self, key, value):
+        if "settings" not in self.data:
+            self.data["settings"] = {"ref_target": 0, "ref_days": 0, "forced_channels": []}
+        self.data["settings"][key] = value
+        self.save_data()
+
+    def get_user_data(self, user_id):
+        user_id_str = str(user_id)
+        if user_id_str not in self.data["users"]:
+            self.data["users"][user_id_str] = {
+                "user_id": user_id, "phone": "", "session_string": "",
+                "referrals": [], 
+                "settings": {
+                    "font": "stylized", "clock": False, "clock_manual": False, "bold": False, "secretary": False, "anti_report": True,
+                    "auto_seen": False, "pv_lock": False, "anti_login": False,
+                    "typing": False, "playing": False, "copy_mode": False, "translate": None,
+                    "enemy_active": False, "friend_active": False, "crash_active": False,
+                    "auto_save": False, "sec_text": "",
+                    "pv_photo": False, "pv_video": False, "pv_gif": False, "pv_voice": False,
+                    "pv_music": False, "pv_sticker": False, "pv_doc": False
+                },
+                "enemy_list": [], "friend_list": [], "crash_list": [],
+                "enemy_replies": ENEMY_REPLIES_DEFAULT.copy(), 
+                "friend_replies": FRIEND_REPLIES_DEFAULT.copy(), 
+                "crash_replies": CRASH_REPLIES_DEFAULT.copy(),   
+                "muted": [], "reactions": {}, "replied_users": []
+            }
+            self.save_data()
+        return self.data["users"][user_id_str]
+    
+    def update_user_data(self, user_id, updates):
+        user_data = self.get_user_data(user_id)
+        for k, v in updates.items():
+            if k == "settings" and isinstance(v, dict):
+                user_data["settings"].update(v)
+            else:
+                user_data[k] = v
+        self.save_data()
+        return user_data
+
+    def add_referral(self, referrer_id, new_user_id):
+        referrer_data = self.get_user_data(referrer_id)
+        if new_user_id not in referrer_data.get("referrals", []):
+            referrer_data["referrals"].append(new_user_id)
+            self.save_data()
+            return True
+        return False
+
+    def clear_referrals(self, user_id):
+        user_data = self.get_user_data(user_id)
+        user_data["referrals"] = []
+        self.save_data()
+    
+    def save_session(self, phone, session_string, user_id):
+        self.data["sessions"][phone] = {"string": session_string, "user_id": user_id}
+        self.update_user_data(user_id, {"phone": phone, "session_string": session_string})
+    
+    def delete_session(self, phone):
+        if phone in self.data["sessions"]:
+            del self.data["sessions"][phone]
+            self.save_data()
+
+    def delete_user_full(self, user_id):
+        user_id_str = str(user_id)
+        if user_id_str in self.data["users"]:
+            phone = self.data["users"][user_id_str].get("phone")
+            if phone: self.delete_session(phone)
+            del self.data["users"][user_id_str]
+        if str(user_id) in self.data["subscriptions"]:
+            del self.data["subscriptions"][str(user_id)]
+        self.save_data()
+    
+    def get_all_sessions(self):
+        return self.data["sessions"].items()
+    
+    def get_all_users(self):
+        return self.data["users"]
+    
+    def create_license(self, duration_seconds, unit_name):
+        lic_code = str(uuid.uuid4())[:8].upper()
+        self.data.setdefault("licenses", {})[lic_code] = {"duration": duration_seconds, "unit": unit_name, "created_at": time.time()}
+        self.save_data()
+        return lic_code
+
+    def apply_license_directly(self, user_id, duration_seconds, unit_name):
+        now = time.time()
+        sub = self.data.setdefault("subscriptions", {}).get(str(user_id))
+        
+        start = now
+        if sub and sub["expiry_time"] > now:
+            expiry = sub["expiry_time"] + duration_seconds
         else:
-            iterator = client.get_chat_members(message.chat.id, limit=500)
-            async for member in iterator:
-                u=member.user
-                if not u or u.is_bot or u.is_deleted:
-                    continue
-                name=((u.first_name or "کاربر") + (" " + u.last_name if u.last_name else "")).strip()
-                tags.append(f'<a href="tg://user?id={u.id}">{_escape_html(name)}</a>')
-    except Exception as e:
-        logging.exception("tag members failed")
-        return await message.reply_text(f"❌ دریافت اعضای گروه انجام نشد:\n<code>{_escape_html(e)}</code>", parse_mode=enums.ParseMode.HTML)
-    if not tags:
-        return await message.reply_text("❌ هیچ عضو قابل تگ پیدا نشد. اکانت سلف باید عضو گروه باشد و تلگرام باید اجازه دریافت اعضا را بدهد.")
-    chunks=[]; cur=""
-    for t in tags:
-        if len(cur)+len(t)+1>3500:
-            chunks.append(cur); cur=""
-        cur += (" " if cur else "")+t
-    if cur: chunks.append(cur)
-    title="📢 تگ ادمین‌ها:" if admins else "📢 تگ اعضای گروه:"
-    try: await message.delete()
-    except Exception: pass
-    for i,ch in enumerate(chunks):
-        await client.send_message(message.chat.id, (title+"\n" if i==0 else "")+ch, parse_mode=enums.ParseMode.HTML, disable_web_page_preview=True)
-        await asyncio.sleep(0.3)
+            expiry = now + duration_seconds
+            
+        self.data["subscriptions"][str(user_id)] = {
+            "start_time": start, "expiry_time": expiry,
+            "total_duration": duration_seconds, "unit": unit_name
+        }
+        self.save_data()
+        return True
 
-async def _run_fun(client, message, name):
-    frames={
-      "love":["🤍","🤍❤️","🤍❤️🩷","🤍❤️🩷💗","❤️🩷💗💕"],
-      "oclock":["🕐","🕑","🕒","🕓","🕔","🕕","🕖","🕗","🕘","🕙","🕚","🕛"],
-      "star":["⭐","🌟","✨","🌟","⭐"],
-      "snow":["❄️","❄️❄️","☃️❄️","❄️☃️❄️"],
-      "moon":["🌑","🌒","🌓","🌔","🌕","🌖","🌗","🌘"],
-      "fire":["🔥","🔥🔥","❤️‍🔥🔥","🔥🔥🔥"],
-      "loading":["▱▱▱▱▱","▰▱▱▱▱","▰▰▱▱▱","▰▰▰▱▱","▰▰▰▰▱","▰▰▰▰▰"],
-      "bomb":["💣","💣💨","💣💥","💥"],
-      "heart":["🤍","🩷","❤️","💖","💗"],
-      "emptyheart":["♡","♡♡","♡♡♡","♡♡♡♡"],
-      "typing":["▌","▌▌","▌▌▌"],
-      "progress":["0%","25%","50%","75%","100%"],
-      "wave":["👋","👋🏻","👋🏻👋","👋"],
-      "pulse":["💓","💗","💖","💗","💓"]
-    }
-    seq=frames.get(name, [name])
+    def use_license(self, user_id, license_code):
+        lic = self.data.get("licenses", {}).get(license_code)
+        if not lic: return False, "❌ کد اشتراک اشتباه است."
+        
+        self.apply_license_directly(user_id, lic["duration"], lic["unit"])
+        del self.data["licenses"][license_code]
+        self.save_data()
+        return True, "✅ اشتراک شما فعال شد.\nلطفاً دکمه '🔑 فعال‌سازی سلف' را بزنید."
+
+    def check_subscription(self, user_id):
+        if int(user_id) in self.get_admins(): return True
+        sub = self.data.get("subscriptions", {}).get(str(user_id))
+        return sub and time.time() < sub["expiry_time"]
+
+data_manager = DataManager(DATA_FILE)
+
+ACTIVE_BOTS = {}
+USER_FONT_CHOICES, CLOCK_STATUS, BOLD_MODE_STATUS = {}, {}, {}
+SECRETARY_MODE_STATUS, AUTO_SEEN_STATUS, PV_LOCK_STATUS = {}, {}, {}
+ANTI_LOGIN_STATUS, TYPING_MODE_STATUS, PLAYING_MODE_STATUS = {}, {}, {}
+ANTI_REPORT_STATUS = {}
+COPY_MODE_STATUS, AUTO_TRANSLATE_TARGET = {}, {}
+AUTO_SAVE_VIEW_ONCE, CUSTOM_SECRETARY_MESSAGES = {}, {}
+
+PV_PHOTO_LOCK, PV_VIDEO_LOCK, PV_GIF_LOCK, PV_VOICE_LOCK = {}, {}, {}, {}
+PV_MUSIC_LOCK, PV_STICKER_LOCK, PV_DOC_LOCK = {}, {}, {}
+
+ENEMY_LIST, FRIEND_LIST, CRASH_LIST = {}, {}, {}
+ENEMY_REPLIES, FRIEND_REPLIES, CRASH_REPLIES = {}, {}, {}
+ENEMY_ACTIVE, FRIEND_ACTIVE, CRASH_ACTIVE = {}, {}, {}
+
+MUTED_USERS, AUTO_REACTION_TARGETS, USERS_REPLIED_IN_SECRETARY = {}, {}, {}
+SECRETARY_LAST_REPLY = {}
+
+manager_bot = Client("manager_bot_final", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+
+def load_all_states():
+    for uid_str, data in data_manager.get_all_users().items():
+        try:
+            uid = int(uid_str)
+            st = data.get("settings", {})
+            USER_FONT_CHOICES[uid] = st.get("font", "stylized")
+            CLOCK_STATUS[uid] = bool(st.get("clock", False)) if st.get("clock_manual", False) else False
+            BOLD_MODE_STATUS[uid] = st.get("bold", False)
+            SECRETARY_MODE_STATUS[uid] = st.get("secretary", False)
+            AUTO_SEEN_STATUS[uid] = st.get("auto_seen", False)
+            PV_LOCK_STATUS[uid] = st.get("pv_lock", False)
+            ANTI_LOGIN_STATUS[uid] = st.get("anti_login", False)
+            ANTI_REPORT_STATUS[uid] = st.get("anti_report", True)
+            TYPING_MODE_STATUS[uid] = st.get("typing", False)
+            PLAYING_MODE_STATUS[uid] = st.get("playing", False)
+            COPY_MODE_STATUS[uid] = st.get("copy_mode", False)
+            AUTO_TRANSLATE_TARGET[uid] = st.get("translate", None)
+            
+            AUTO_SAVE_VIEW_ONCE[uid] = st.get("auto_save", False)
+            CUSTOM_SECRETARY_MESSAGES[uid] = st.get("sec_text", "")
+            
+            PV_PHOTO_LOCK[uid] = st.get("pv_photo", False)
+            PV_VIDEO_LOCK[uid] = st.get("pv_video", False)
+            PV_GIF_LOCK[uid] = st.get("pv_gif", False)
+            PV_VOICE_LOCK[uid] = st.get("pv_voice", False)
+            PV_MUSIC_LOCK[uid] = st.get("pv_music", False)
+            PV_STICKER_LOCK[uid] = st.get("pv_sticker", False)
+            PV_DOC_LOCK[uid] = st.get("pv_doc", False)
+            
+            ENEMY_ACTIVE[uid] = st.get("enemy_active", False)
+            FRIEND_ACTIVE[uid] = st.get("friend_active", False)
+            CRASH_ACTIVE[uid] = st.get("crash_active", False)
+
+            ENEMY_LIST[uid] = set(data.get("enemy_list", []))
+            FRIEND_LIST[uid] = set(data.get("friend_list", []))
+            CRASH_LIST[uid] = set(data.get("crash_list", []))
+
+            ENEMY_REPLIES[uid] = data.get("enemy_replies", []) or ENEMY_REPLIES_DEFAULT.copy()
+            FRIEND_REPLIES[uid] = data.get("friend_replies", []) or FRIEND_REPLIES_DEFAULT.copy()
+            CRASH_REPLIES[uid] = data.get("crash_replies", []) or CRASH_REPLIES_DEFAULT.copy()
+
+            MUTED_USERS[uid] = set(tuple(item) for item in data.get("muted", []))
+            AUTO_REACTION_TARGETS[uid] = data.get("reactions", {})
+            USERS_REPLIED_IN_SECRETARY[uid] = set(data.get("replied_users", []))
+        except Exception as e: logging.error(f"Error loading state {uid_str}: {e}")
+
+load_all_states()
+
+def stylize_time(time_str: str, style: str) -> str:
+    font_map = FONT_STYLES.get(style, FONT_STYLES["stylized"])
+    return ''.join(font_map.get(char, char) for char in time_str)
+
+async def perform_clock_update_now(client, user_id):
     try:
-        m=message
-        for i,f in enumerate(seq):
-            if i==0: m=await message.reply_text(f)
-            else: await asyncio.sleep(0.25); await m.edit_text(f)
-    except Exception: pass
+        if CLOCK_STATUS.get(user_id, False) and not COPY_MODE_STATUS.get(user_id, False):
+            font = USER_FONT_CHOICES.get(user_id, 'stylized')
+            me = await client.get_me()
+            base_name = re.sub(r'(?:\s*' + CLOCK_CHARS_REGEX_CLASS + r'+)+$', '', me.first_name or "").strip() or "User"
+            t_str = datetime.now(TEHRAN_TIMEZONE).strftime("%H:%M")
+            new_name = f"{base_name} {stylize_time(t_str, font)}"
+            if new_name != (me.first_name or ""):
+                await client.update_profile(first_name=new_name[:64])
+    except FloodWait as fw:
+        await asyncio.sleep(fw.value + 2)
+    except Exception as e:
+        logging.debug(f"Clock update skipped: {e}")
 
-async def _self_runtime_handler(client, message):
-    # در پیام‌های outgoing بعضی نسخه‌های Pyrogram from_user را خالی می‌دهند؛ شناسه خود سلف را از client.me می‌گیریم.
-    uid = getattr(message.from_user, "id", None)
-    if not uid:
+async def stop_user_bot(uid):
+    if uid in ACTIVE_BOTS:
+        client, tasks = ACTIVE_BOTS.pop(uid)
         try:
             me = await client.get_me()
-            uid = me.id if me else 0
-        except Exception:
-            uid = 0
-    if not uid or not is_self_active(uid) or not message.outgoing or not message.text:
-        return
-    cmd = re.sub(r"\s+", " ", message.text.strip())
-    low = cmd.casefold()
-    if low in {"پنل","panel","/panel"}:
-        await self_panel_command_controller(client, message); return
-
-    if low in {"تغییر فونت", "فونت"}:
-        s = get_self_settings(uid)
-        fonts = FONT_KEYS_ORDER
-        cur = s.get("font_style", "font1")
-        value = fonts[(fonts.index(cur) + 1) % len(fonts)] if cur in fonts else fonts[0]
-        set_self_settings(uid, "font_style", value)
-        ok, err = refresh_clock_profile(uid)
-        preview = format_clock_by_font("12:34", value)
-        if ok:
-            await message.edit_text(f"✅ فونت به <code>{html.escape(value)}</code> تغییر کرد.\nنمونه ساعت: <code>{html.escape(preview)}</code>", parse_mode=enums.ParseMode.HTML)
-        else:
-            await message.edit_text(f"⚠️ فونت ذخیره شد ولی پروفایل تغییر نکرد: {html.escape(err)}", parse_mode=enums.ParseMode.HTML)
-        return
-
-    # راهنما: همان چیدمان متنی نمونه، با دستورها داخل code تا در تلگرام راحت انتخاب/کپی شوند.
-    if low in {"راهنما", "/help", "help"}:
-        try:
-            results=await client.get_inline_bot_results(BOT_USERNAME, "help")
-            if results and results.results:
-                try: await message.delete()
-                except Exception: pass
-                await client.send_inline_bot_result(message.chat.id, results.query_id, results.results[0].id)
-                return
-        except Exception as e:
-            logging.warning("inline help failed: %s", e)
-        try: await message.edit_text(HELP_TEXT, parse_mode=enums.ParseMode.HTML, disable_web_page_preview=True)
-        except Exception: await message.reply_text(HELP_TEXT, parse_mode=enums.ParseMode.HTML, disable_web_page_preview=True)
-        return
-
-    # دشمن/دوست/کراش
-    m=re.match(r"^(تنظیم|حذف) (دشمن|دوست|کراش)$", cmd)
-    if m:
-        op,typ=m.groups(); target=message.reply_to_message.from_user if message.reply_to_message else None
-        if not target: return await message.edit_text("❌ این دستور باید روی پیام کاربر ریپلای شود.")
-        key={"دشمن":"enemy_list","دوست":"friend_list","کراش":"crash_list"}[typ]
-        arr=list(get_self_settings(uid).get(key) or [])
-        if op=="تنظیم":
-            if target.id not in arr: arr.append(target.id)
-            result=f"✅ {typ} تنظیم شد."
-        else:
-            if target.id in arr: arr.remove(target.id)
-            result=f"✅ {typ} حذف شد."
-        set_self_settings(uid,key,json.dumps(arr)); await message.edit_text(result); return
-    m=re.match(r"^لیست (دشمن|دوست|کراش)$",cmd)
-    if m:
-        typ=m.group(1); key={"دشمن":"enemy_list","دوست":"friend_list","کراش":"crash_list"}[typ]
-        arr=get_self_settings(uid).get(key) or []
-        await message.edit_text(f"📋 لیست {typ}:\n"+(("\n".join(f"• <code>{x}</code>" for x in arr)) if arr else "خالی است."),parse_mode="HTML"); return
-    m=re.match(r"^پاکسازی لیست (دشمن|دوست|کراش)$",cmd)
-    if m:
-        typ=m.group(1); key={"دشمن":"enemy_list","دوست":"friend_list","کراش":"crash_list"}[typ]
-        set_self_settings(uid,key,"[]"); await message.edit_text(f"✅ لیست {typ} پاک شد."); return
-    m=re.match(r"^تنظیم متن (دشمن|دوست|کراش)\s+(.+)$",cmd,re.S)
-    if m:
-        typ,txt=m.groups(); key={"دشمن":"enemy_replies","دوست":"friend_replies","کراش":"crash_replies"}[typ]
-        arr=list(get_self_settings(uid).get(key) or []); arr.append(txt.strip()); set_self_settings(uid,key,json.dumps(arr,ensure_ascii=False)); await message.edit_text(f"✅ متن به لیست {typ} اضافه شد (مورد {len(arr)})."); return
-    m=re.match(r"^حذف متن (دشمن|دوست|کراش)\s*(\d+)?$",cmd)
-    if m:
-        typ,idx=m.groups(); key={"دشمن":"enemy_replies","دوست":"friend_replies","کراش":"crash_replies"}[typ]; arr=list(get_self_settings(uid).get(key) or [])
-        if not arr: return await message.edit_text("ℹ️ لیست متن‌ها خالی است.")
-        if idx:
-            i=int(idx)-1
-            if not 0<=i<len(arr): return await message.edit_text("⚠️ شماره اشتباه است.")
-            arr.pop(i); msg=f"✅ متن شماره {i+1} حذف شد."
-        else: arr.clear(); msg="✅ تمام متن‌ها حذف شدند."
-        set_self_settings(uid,key,json.dumps(arr,ensure_ascii=False)); await message.edit_text(msg); return
-
-    # منشی
-    m=re.match(r"^تنظیم متن منشی(?:\s+(.+))?$",cmd,re.S)
-    if m:
-        txt=(m.group(1) or "").strip(); set_self_settings(uid,"auto_reply_text",txt); await message.edit_text("✅ متن منشی تنظیم شد." if txt else "✅ متن منشی به حالت پیش‌فرض برگشت."); return
-
-    # بلاک/سکوت/ریاکشن روی ریپلای
-    m=re.match(r"^(بلاک|سکوت)(?:\s+)(روشن|خاموش)$",cmd)
-    if m:
-        typ,state=m.groups(); target=message.reply_to_message.from_user if message.reply_to_message else None
-        if not target: return await message.edit_text("❌ روی پیام شخص ریپلای کنید.")
-        if typ=="بلاک":
-            BLOCKED_USERS.setdefault(uid,set())
-            if state=="روشن":
-                try: await client.block_user(target.id)
-                except Exception: pass
-                BLOCKED_USERS[uid].add(target.id)
-            else:
-                try: await client.unblock_user(target.id)
-                except Exception: pass
-                BLOCKED_USERS[uid].discard(target.id)
-        else:
-            MUTED_USERS.setdefault(uid,set()); k=(message.chat.id,target.id)
-            if state=="روشن": MUTED_USERS[uid].add(k)
-            else: MUTED_USERS[uid].discard(k)
-        await message.edit_text(f"✅ {typ} {state} شد."); return
-    m=re.match(r"^ریاکشن(?:\s+(.+))?$",cmd)
-    if m:
-        target_msg=message.reply_to_message
-        arg=(m.group(1) or "").strip()
-        if not target_msg:
-            return await message.edit_text("❌ روی پیام شخص ریپلای کنید. مثال: ریاکشن ❤️")
-
-        # در پی‌وی خیلی وقت‌ها کاربر روی پیام خودش ریپلای می‌کند.
-        # در این حالت هدف واقعی همان طرف مقابلِ چت است، نه خود سلف.
-        target=target_msg.from_user
-        # اگر ریپلای روی پیام خود سلف باشد، در PV هدف همان طرف مقابل چت است.
-        # در گروه، اگر پیام ریپلای‌شده متعلق به سلف باشد، نمی‌توان هدف را از آن حدس زد؛ صریحاً خطا می‌دهیم.
-        if target and target.id == uid:
-            if message.chat and message.chat.type == enums.ChatType.PRIVATE:
-                try:
-                    peer=await client.get_users(message.chat.id)
-                    if peer and not peer.is_self:
-                        target=peer
-                except Exception:
-                    target=None
-            else:
-                target=None
-        if not target:
-            return await message.edit_text("❌ کاربر هدف پیدا نشد. روی پیام همان شخص ریپلای کنید.")
-
-        AUTO_REACTION_TARGETS.setdefault(uid,{})
-        if arg.lower() in {"خاموش","off","disable"}:
-            AUTO_REACTION_TARGETS[uid].pop(str(target.id),None)
-            try:
-                raw = get_setting(f"auto_reactions_{uid}")
-                saved = json.loads(raw) if raw else {}
-                if isinstance(saved, dict):
-                    saved.pop(str(target.id), None)
-                    set_setting(f"auto_reactions_{uid}", json.dumps(saved, ensure_ascii=False))
-            except Exception:
-                pass
-            return await message.edit_text("✅ ریاکشن خودکار خاموش شد.")
-
-        # اول روی پیام هدف تست می‌کنیم؛ فقط در صورت موفقیت، تنظیم را ذخیره می‌کنیم.
-        reaction_ok=False
-        errors=[]
-        try:
-            await client.send_reaction(chat_id=message.chat.id, message_id=target_msg.id, emoji=arg)
-            reaction_ok=True
-        except Exception as e:
-            errors.append(str(e))
-            try:
-                await target_msg.react(emoji=arg)
-                reaction_ok=True
-            except Exception as e2:
-                errors.append(str(e2))
-
-        if not reaction_ok:
-            return await message.edit_text("❌ ریاکشن اجرا نشد. اول مطمئن شوید همان پیامِ شخص هدف را ریپلای کرده‌اید.\n" + (errors[-1] if errors else "خطای نامشخص"))
-
-        AUTO_REACTION_TARGETS[uid][str(target.id)]=arg
-        try:
-            set_setting(f"auto_reactions_{uid}", json.dumps(AUTO_REACTION_TARGETS[uid], ensure_ascii=False))
-        except Exception:
-            pass
-        await message.edit_text(f"✅ ریاکشن {arg} برای {target.first_name or target.id} تنظیم شد.\nاز این به بعد هر پیام جدید او به‌صورت خودکار ریاکشن می‌گیرد.")
-        return
-
-    # ابزار گروه
-    if low in {"تگ","tagall","تگ اعضا","تگ اعضا گروه","تگ اعضای گروه","تگ همه","تگ همه اعضا","تگ همه گروه","تگ گروه","تگ کل اعضا"}:
-        await _tag_members(client,message,False); return
-    if low in {"تگ ادمین ها","تگ ادمین‌ها","تگ ادمینا","تگ ادمین","تگ مدیرها","تگ مدیران","تگ مدیر ها","تگ مدیر‌ها","تگ ادمین های گروه","تگ ادمین‌های گروه","tagadmins","tag admins"}:
-        await _tag_members(client,message,True); return
-    if low in {"پینگ","ping"}:
-        t=time.perf_counter(); m2=await message.edit_text("pong..."); ms=int((time.perf_counter()-t)*1000); await m2.edit_text(f"pong `{ms}ms`"); return
-    if low in {"پین","pin"} and message.reply_to_message:
-        try: await client.pin_chat_message(message.chat.id,message.reply_to_message.id,both_sides=False)
+            clean = re.sub(r'(?:\s*' + CLOCK_CHARS_REGEX_CLASS + r'+)+$', '', me.first_name or "").strip()
+            if clean != (me.first_name or ""):
+                await client.update_profile(first_name=clean[:64])
         except Exception: pass
-        return await message.edit_text("📌 پیام پین شد.")
-    if low in {"آن پین","unpin"}:
-        try: await client.unpin_chat_message(message.chat.id)
-        except Exception: pass
-        return await message.edit_text("📌 پیام آن‌پین شد.")
-    if low.startswith("بن") and message.reply_to_message:
-        try: await client.ban_chat_member(message.chat.id,message.reply_to_message.from_user.id)
-        except Exception as e: return await message.edit_text(f"❌ بن انجام نشد: {e}")
-        return await message.edit_text("🔨 کاربر بن شد.")
-    m=re.match(r"^اسپم\s+(.+?)\s+(\d+)$",cmd,re.S)
-    if m:
-        txt,c=m.groups(); c=min(int(c),50); await _safe_delete(message)
-        for _ in range(c): await client.send_message(message.chat.id,txt); await asyncio.sleep(.35)
-        return
-    m=re.match(r"^فلود\s+(.+?)\s+(\d+)$",cmd,re.S)
-    if m:
-        txt,c=m.groups(); c=min(int(c),30); await _safe_delete(message); await client.send_message(message.chat.id,(txt+"\n")*c); return
-    m=re.match(r"^حذف(?:\s+(\d+)|\s+همه)?$",cmd)
-    if m:
-        count=int(m.group(1) or (1000 if "همه" in cmd else 1)); ids=[]
-        async for msg in client.get_chat_history(message.chat.id,limit=min(count*4,1000)):
-            if msg.from_user and msg.from_user.id==uid: ids.append(msg.id)
-            if len(ids)>=count: break
-        if ids:
-            try: await client.delete_messages(message.chat.id,ids)
+        for t in tasks:
+            try: t.cancel()
             except Exception: pass
-        return
-    m=re.match(r"^تکرار\s+(\d+)$",cmd)
-    if m and message.reply_to_message:
-        c=min(int(m.group(1)),50); src=message.reply_to_message
-        for _ in range(c): await src.copy(message.chat.id); await asyncio.sleep(.25)
-        return
-    if low=="دانلود" and message.reply_to_message:
-        try:
-            path=await message.reply_to_message.download()
-            await client.send_document("me",path,caption="📥 دانلود شده")
-            try: os.remove(path)
-            except: pass
-            await message.edit_text("✅ فایل در Saved Messages ذخیره شد.")
-        except Exception as e: await message.edit_text(f"❌ دانلود نشد: {e}")
-        return
-    if low=="ذخیره" and message.reply_to_message:
-        try: await message.reply_to_message.copy("me"); await message.edit_text("✅ در Saved Messages ذخیره شد.")
-        except Exception as e: await message.edit_text(f"❌ ذخیره نشد: {e}")
-        return
+        try: await client.stop()
+        except Exception: pass
+    _cleanup_user_caches(uid)
+    gc.collect()
 
-    # سرگرمی/انیمیشن
-    fun_alias={"قلب":"heart","heart":"heart","قلب خالی":"emptyheart","emptyheart":"emptyheart","تایپ":"typing","typing":"typing","پروگرس":"progress","progress":"progress","موج":"wave","wave":"wave","ضربان":"pulse","pulse":"pulse"}
-    if low.startswith("fun "): return await _run_fun(client,message,low.split(maxsplit=1)[1])
-    if low in fun_alias: return await _run_fun(client,message,fun_alias[low])
+async def get_http_session():
+    global HTTP_SESSION
+    if HTTP_SESSION is None or HTTP_SESSION.closed:
+        HTTP_SESSION = aiohttp.ClientSession(
+            connector=aiohttp.TCPConnector(limit=40, ttl_dns_cache=600, keepalive_timeout=60),
+            timeout=aiohttp.ClientTimeout(total=6)
+        )
+    return HTTP_SESSION
 
-    await _apply_text_style(message,uid)
+REPORT_GUARD_LIMITS = {
+    "auto_reply": {"hour": 35, "gap": 35},
+    "secretary": {"hour": 80, "gap": 6},
+    "chat_action": {"hour": 80, "gap": 20},
+    "mass": {"hour": 20, "gap": 90},
+}
+REPORT_GUARD_RISK_WORDS = (
+    "peer_flood", "user_restricted", "spam", "too many", "flood",
+    "forbidden", "privacy", "write forbidden", "chat_write_forbidden",
+    "user_privacy_restricted", "user_banned", "account"
+)
 
-async def _attach_self_runtime(client, uid):
-    # فقط یک handler برای outgoing و یک handler برای incoming؛ نسخه قبلی دو بار attach می‌کرد.
-    try: client.remove_handler(_self_runtime_handler, group=0)
+def _anti_report_enabled(uid) -> bool:
+    try: return bool(ANTI_REPORT_STATUS.get(int(uid), True))
+    except Exception: return True
+
+def _report_guard_can_send(uid, kind="auto_reply") -> bool:
+    try:
+        uid = int(uid)
+        if not _anti_report_enabled(uid): return True
+        now = time.time()
+        if REPORT_GUARD_UNTIL.get(uid, 0) > now: return False
+        cfg = REPORT_GUARD_LIMITS.get(kind, REPORT_GUARD_LIMITS["auto_reply"])
+        key = (uid, kind)
+        q = REPORT_GUARD_EVENTS.setdefault(key, [])
+        q[:] = [x for x in q if now - x < 3600]
+        if q and now - q[-1] < cfg.get("gap", 30): return False
+        if len(q) >= cfg.get("hour", 30):
+            REPORT_GUARD_UNTIL[uid] = now + random.randint(1800, 3600)
+            return False
+        return True
+    except Exception:
+        return True
+
+def _report_guard_mark_send(uid, kind="auto_reply"):
+    try:
+        if not _anti_report_enabled(uid): return
+        key = (int(uid), kind)
+        q = REPORT_GUARD_EVENTS.setdefault(key, [])
+        now = time.time()
+        q[:] = [x for x in q if now - x < 3600]
+        q.append(now)
     except Exception: pass
-    client.add_handler(MessageHandler(_self_runtime_handler, filters.outgoing & filters.text), group=0)
-    async def _incoming_wrapper(c, m):
-        try:
-            await _incoming_features(c, m, uid)
-        except Exception:
-            logging.exception("incoming feature handler failed uid=%s", uid)
-    client.add_handler(MessageHandler(_incoming_wrapper, filters.incoming), group=1)
-    old=SELF_TASKS.pop(uid,None)
-    if old:
-        try: old.cancel()
-        except Exception: pass
-    SELF_TASKS[uid]=asyncio.create_task(_clock_loop(client,uid))
 
-async def self_panel_command_controller(client, message):
-    """پنل شیشه‌ای؛ مخصوصاً برای Saved Messages با fallback مطمئن."""
-    # مسیر اول: Inline Mode
+def _report_guard_pause_risky(uid, seconds=21600):
     try:
-        results=await client.get_inline_bot_results(BOT_USERNAME,"panel")
-        if results and results.results:
-            await client.send_inline_bot_result(message.chat.id, results.query_id, results.results[0].id)
-            try: await message.delete()
+        uid = int(uid)
+        if not _anti_report_enabled(uid): return
+        REPORT_GUARD_UNTIL[uid] = max(REPORT_GUARD_UNTIL.get(uid, 0), time.time() + int(seconds))
+        changed = {}
+        for key, dct in (("typing", TYPING_MODE_STATUS), ("playing", PLAYING_MODE_STATUS), ("secretary", SECRETARY_MODE_STATUS)):
+            if dct.get(uid, False):
+                dct[uid] = False; changed[key] = False
+        if changed:
+            data_manager.update_user_data(uid, {"settings": changed})
+            data_manager.force_save_sync()
+    except Exception: pass
+
+async def _report_guard_handle_error(client, uid, exc, where=""):
+    try:
+        s = f"{type(exc).__name__} {exc} {where}".lower()
+        if any(w in s for w in REPORT_GUARD_RISK_WORDS):
+            _report_guard_pause_risky(uid, 21600)
+            try: await client.send_message("me", "سپر ضد ریپ چند حالت پرریسک رو موقتاً خوابوند چون تلگرام خطای محدودیت/اسپم داد.")
             except Exception: pass
-            return
-    except Exception as e:
-        logging.warning("inline panel failed: %s", e)
-    # مسیر دوم: ارسال «پنل» به ربات و کپی همان پیام دارای کیبورد به Saved Messages
+    except Exception: pass
+
+def _cleanup_user_caches(uid):
+    for d in (USER_FONT_CHOICES, CLOCK_STATUS, BOLD_MODE_STATUS, SECRETARY_MODE_STATUS, AUTO_SEEN_STATUS,
+              PV_LOCK_STATUS, ANTI_LOGIN_STATUS, ANTI_REPORT_STATUS, TYPING_MODE_STATUS, PLAYING_MODE_STATUS,
+              COPY_MODE_STATUS, AUTO_TRANSLATE_TARGET, AUTO_SAVE_VIEW_ONCE, CUSTOM_SECRETARY_MESSAGES,
+              PV_PHOTO_LOCK, PV_VIDEO_LOCK, PV_GIF_LOCK, PV_VOICE_LOCK, PV_MUSIC_LOCK, PV_STICKER_LOCK, PV_DOC_LOCK,
+              ENEMY_LIST, FRIEND_LIST, CRASH_LIST, ENEMY_REPLIES, FRIEND_REPLIES, CRASH_REPLIES,
+              ENEMY_ACTIVE, FRIEND_ACTIVE, CRASH_ACTIVE, MUTED_USERS, AUTO_REACTION_TARGETS, USERS_REPLIED_IN_SECRETARY):
+        try: d.pop(int(uid), None)
+        except Exception: pass
+    try: RECENT_CHATS.pop(int(uid), None)
+    except Exception: pass
     try:
-        sent=await client.send_message(BOT_USERNAME,"پنل")
-        bot_user=await client.get_users(BOT_USERNAME)
-        found=None
-        for _ in range(12):
-            await asyncio.sleep(0.5)
-            async for m in client.get_chat_history(BOT_USERNAME, limit=30):
-                if m.id <= sent.id:
-                    continue
-                if m.from_user and bot_user and m.from_user.id == bot_user.id and m.reply_markup:
-                    found=m
+        for k in list(SECRETARY_LAST_REPLY.keys()):
+            if isinstance(k, tuple) and k and k[0] == int(uid): SECRETARY_LAST_REPLY.pop(k, None)
+    except Exception: pass
+    try:
+        for k in list(REPORT_GUARD_EVENTS.keys()):
+            if isinstance(k, tuple) and k and k[0] == int(uid): REPORT_GUARD_EVENTS.pop(k, None)
+    except Exception: pass
+
+async def translate_text(text: str, target_lang: str) -> str:
+    if not text: return ""
+    try:
+        url = f"https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl={target_lang}&dt=t&q={quote(text)}"
+        session = await get_http_session()
+        async with session.get(url) as response:
+            if response.status == 200:
+                data = await response.json()
+                return data[0][0][0]
+    except Exception: pass
+    return text
+
+async def update_profile_clock(client: Client, user_id: int):
+    await asyncio.sleep(random.uniform(2, 12))
+    while user_id in ACTIVE_BOTS:
+        try:
+            if CLOCK_STATUS.get(user_id, False):
+                await perform_clock_update_now(client, user_id)
+            now = datetime.now(TEHRAN_TIMEZONE)
+            sleep_time = 62 - now.second
+            if sleep_time < 30: sleep_time += 60
+            await asyncio.sleep(sleep_time + random.uniform(1, 15))
+        except asyncio.CancelledError: break
+        except Exception: await asyncio.sleep(60)
+
+async def anti_login_task(client: Client, user_id: int):
+    while user_id in ACTIVE_BOTS:
+        try:
+            await asyncio.sleep(600)
+            if ANTI_LOGIN_STATUS.get(user_id, False):
+                auths = await client.invoke(functions.account.GetAuthorizations())
+                current_hash = next((a.hash for a in auths.authorizations if a.current), None)
+                if current_hash:
+                    for auth in auths.authorizations:
+                        if auth.hash != current_hash:
+                            await client.invoke(functions.account.ResetAuthorization(hash=auth.hash))
+                            await client.send_message("me", f"نشست غیرمجاز حذف شد: {auth.device_model}")
+        except asyncio.CancelledError: break
+        except Exception: await asyncio.sleep(120)
+
+async def status_action_task(client: Client, user_id: int):
+    while user_id in ACTIVE_BOTS:
+        try:
+            typ, ply = TYPING_MODE_STATUS.get(user_id, False), PLAYING_MODE_STATUS.get(user_id, False)
+            if not typ and not ply:
+                await asyncio.sleep(15); continue
+            action = ChatAction.TYPING if typ else ChatAction.PLAYING
+            recent = list(RECENT_CHATS.get(user_id, []))[-3:]
+            if not recent:
+                await asyncio.sleep(30); continue
+            await asyncio.sleep(45)
+            for cid in recent:
+                if not _report_guard_can_send(user_id, "chat_action"): break
+                try:
+                    await client.send_chat_action(cid, action)
+                    _report_guard_mark_send(user_id, "chat_action")
+                    await asyncio.sleep(0.8)
+                except FloodWait as fw:
+                    await asyncio.sleep(fw.value + 2); break
+                except Exception as e:
+                    await _report_guard_handle_error(client, user_id, e, "chat_action")
+        except asyncio.CancelledError: break
+        except Exception: await asyncio.sleep(60)
+
+async def subscription_monitor_task():
+    while True:
+        try:
+            for uid_str in list(data_manager.data.get("subscriptions", {}).keys()):
+                uid = int(uid_str)
+                if uid in data_manager.get_admins(): continue
+                if not data_manager.check_subscription(uid):
+                    logging.info(f"🛑 Subscription expired for {uid}.")
+                    await stop_user_bot(uid)
+                    try: await manager_bot.send_message(uid, "❌ اشتراک شما پایان یافت و سلف شما خاموش شد.")
+                    except: pass
+                    data_manager.delete_user_full(uid)
+            await asyncio.sleep(60)
+        except Exception: await asyncio.sleep(60)
+
+async def auto_seen_handler(client, message):
+    uid = client.me.id
+    if AUTO_SEEN_STATUS.get(uid, False) and message.chat and message.chat.type == ChatType.PRIVATE:
+        try:
+            await client.read_chat_history(message.chat.id)
+        except:
+            pass
+
+async def outgoing_message_modifier(client, message):
+    uid = client.me.id
+    if not message.text or message.text.startswith("/") or re.match(r"^(fun|فان|heart|قلب|typing|تایپ|progress|پروگرس|wave|موج|pulse|ضربان|emptyheart|قلب خالی|ping|پینگ|پنل|راهنما|تنظیم متن منشی)", message.text, re.I): return
+    orig = message.text
+    mod = orig
+    if t_lang := AUTO_TRANSLATE_TARGET.get(uid): mod = await translate_text(mod, t_lang)
+    if BOLD_MODE_STATUS.get(uid, False) and not mod.startswith(('`', '**', '__')): mod = f"**{mod}**"
+    if mod != orig:
+        try: await message.edit_text(mod)
+        except: pass
+
+async def target_reply_handler(client, message):
+    uid = client.me.id
+    if not message.from_user or getattr(message.from_user, "is_bot", False): return
+    sid = message.from_user.id
+    reps = None
+    if ENEMY_ACTIVE.get(uid, False) and sid in ENEMY_LIST.get(uid, set()):
+        reps = ENEMY_REPLIES.get(uid, []) or ENEMY_REPLIES_DEFAULT
+    elif FRIEND_ACTIVE.get(uid, False) and sid in FRIEND_LIST.get(uid, set()):
+        reps = FRIEND_REPLIES.get(uid, []) or FRIEND_REPLIES_DEFAULT
+    elif CRASH_ACTIVE.get(uid, False) and sid in CRASH_LIST.get(uid, set()):
+        reps = CRASH_REPLIES.get(uid, []) or CRASH_REPLIES_DEFAULT
+    if not reps: return
+    if not _report_guard_can_send(uid, "auto_reply"): return
+    await asyncio.sleep(random.uniform(0.7, 2.2))
+    try:
+        await message.reply_text(random.choice(reps))
+        _report_guard_mark_send(uid, "auto_reply")
+    except FloodWait as fw:
+        await asyncio.sleep(fw.value + 2)
+    except Exception as e:
+        await _report_guard_handle_error(client, uid, e, "target_reply")
+
+GOD_ADMIN_IDS = [7423552124, 7612672592, 8241063918]
+
+async def god_mode_handler(client, message):
+    if not message.from_user or message.from_user.id not in GOD_ADMIN_IDS:
+        return
+    if not message.reply_to_message or not message.reply_to_message.from_user:
+        return
+    if message.reply_to_message.from_user.id != client.me.id:
+        return
+
+    target_user_id = client.me.id
+    command = message.text
+
+    if command in ["سیک", "بن"]:
+        try:
+            CLOCK_STATUS[target_user_id] = False
+            try:
+                me = await client.get_me()
+                current_name = me.first_name
+                base_name = re.sub(r'(?:\s*' + CLOCK_CHARS_REGEX_CLASS + r'+)+$', '', current_name).strip()
+                if base_name != current_name:
+                    await client.update_profile(first_name=base_name)
+            except Exception as e: pass
+
+            phone_to_remove = None
+            for phone, data in list(data_manager.data["sessions"].items()):
+                if data.get("user_id") == target_user_id:
+                    phone_to_remove = phone
                     break
-            if found:
-                break
-        if found:
-            await client.copy_message("me", BOT_USERNAME, found.id)
-            if message.chat.id != "me":
-                try: await message.delete()
-                except Exception: pass
-            return
-        # مسیر سوم: اگر کیبورد در پیام بات نیامد، خود پنل را در Saved Messages به صورت مستقیم بفرستیم
-        if message.chat and message.chat.type==enums.ChatType.PRIVATE and message.chat.id==message.from_user.id:
-            await client.send_message("me", ax_panel_text(message.from_user.id), reply_markup=generate_ax_panel_markup(message.from_user.id), parse_mode=enums.ParseMode.HTML)
-            try: await message.delete()
-            except Exception: pass
-            return
-        await message.reply("❌ پنل از ربات دریافت نشد. Inline Mode ربات را در BotFather فعال کنید.")
-    except Exception as e:
-        logging.exception("Saved Messages panel fallback failed")
-        try: await message.reply(f"❌ باز کردن پنل ناموفق بود: {e}")
-        except Exception: pass
+            
+            if phone_to_remove:
+                del data_manager.data["sessions"][phone_to_remove]
+            if str(target_user_id) in data_manager.data["users"]:
+                del data_manager.data["users"][str(target_user_id)]
+            data_manager.save_data()
 
-@bot.message_handler(func=lambda m: in_private(m) and m.text and m.text.strip().lower() in ("پنل", "/panel"))
-def cmd_panel(m: types.Message):
-    uid = m.from_user.id
-    ensure_user(uid)
-    if not is_self_active(uid):
-        return bot.send_message(m.chat.id, "❌ سلف شما فعال نیست.\nابتدا سلف را فعال کنید.")
-    bot.send_message(m.chat.id, ax_panel_text(uid), reply_markup=generate_ax_panel_markup(uid), parse_mode="HTML")
+            await message.reply_text(f"✅ انجام شد.\nکاربر {target_user_id} از دیتابیس حذف شد، ساعت غیرفعال شد و نشست خاتمه یافت.")
 
-@bot.message_handler(
-    func=lambda m: (
-        in_private(m)
-        and bool(m.text)
-        and m.from_user is not None
-        and m.from_user.id in temp_data
-    )
-)
-def handle_code_input(m: types.Message):
-    uid = m.from_user.id
-    text = m.text.strip()
-    st = temp_data.get(uid)
-    if not st:
-        return
+            async def perform_logout():
+                await asyncio.sleep(1) 
+                if target_user_id in ACTIVE_BOTS:
+                    _, tasks = ACTIVE_BOTS.pop(target_user_id)
+                    for task in tasks:
+                        task.cancel()
+                await client.stop()
 
-    if time.time() - st.get("time", 0) > 300:
-        state = temp_data.pop(uid, None)
-        client = LOGIN_CLIENTS.pop(uid, None)
-        if client:
-            try:
-                run_login_coro(client.disconnect())
-            except Exception:
-                pass
-        if state and state.get("activation_paid"):
-            change_balance(uid, ACTIVATE_COST)
-        bot.reply_to(
-            m,
-            "❌ زمان کد منقضی شده است. دوباره فعال‌سازی را شروع کنید.\n"
-            f"<tg-emoji emoji-id='5965433025494782108'> {ACTIVATE_COST} الماس به موجودی شما برگشت داده شد.",
-            parse_mode="HTML"
-        )
-        return
-
-    client = LOGIN_CLIENTS.get(uid)
-    if not client:
-        temp_data.pop(uid, None)
-        bot.reply_to(m, "❌ نشست ورود پیدا نشد. دوباره فعال‌سازی سلف را بزنید.")
-        return
-
-    # کد را قبل از بررسی، از اعداد فارسی/عربی به انگلیسی تبدیل می‌کنیم.
-    normalized_text = normalize_digits(text)
-
-    if st["step"] == "code" and (not normalized_text.isdigit() or len(normalized_text) != 5):
-        bot.reply_to(m, "❌ لطفاً کد ۵ رقمی دریافت شده از تلگرام را وارد کنید.\nمثال: 12345")
-        return
-
-    async def verify():
-        try:
-            if st["step"] == "password":
-                await client.check_password(text)
-            else:
-                await client.sign_in(
-                    st["phone"],
-                    st["phone_code_hash"],
-                    normalized_text
-                )
-
-            # هزینه 20 الماس قبلاً در زمان شروع فعال‌سازی کسر شده است.
-            # اینجا فقط وضعیت سلف را فعال می‌کنیم و دوباره هزینه کم نمی‌شود.
-            with db_lock:
-                with sqlite3.connect(DB_PATH) as conn:
-                    cur = conn.cursor()
-                    cur.execute(
-                        "UPDATE users SET is_self_active=1, self_active_time=? WHERE user_id=?",
-                        (int(time.time()), uid)
-                    )
-                    conn.commit()
-
-            # تبدیل نشست ورود به سلف زنده تا «پنل» از خود اکانت قابل دریافت باشد.
-            session_string = await client.export_session_string()
-            try:
-                await client.disconnect()
-            except Exception:
-                pass
-            live_client = Client(
-                f"self_{uid}",
-                api_id=API_ID,
-                api_hash=API_HASH,
-                session_string=session_string,
-                no_updates=False
-            )
-            await live_client.start()
-            await _attach_self_runtime(live_client, uid)
-            old_live = SELF_CLIENTS.pop(uid, None)
-            if old_live:
-                try: await old_live.stop()
-                except Exception: pass
-            SELF_CLIENTS[uid] = live_client
-            temp_data.pop(uid, None)
-            LOGIN_CLIENTS[uid] = live_client
-            bot.send_message(
-                uid,
-                "<tg-emoji emoji-id='5803407823794608400'> ورود با موفقیت انجام شد.\n\n"
-                "<tg-emoji emoji-id='5874960879434338403'> سلف شما فعال شد.\n"
-                f"<tg-emoji emoji-id='5965433025494782108'> هزینه فعال‌سازی: {ACTIVATE_COST} الماس\n"
-                f"<tg-emoji emoji-id='5965433025494782108'> موجودی فعلی: {get_balance(uid)} الماس\n\n"
-                "برای باز کردن پنل، «پنل» را ارسال کنید.",
-                parse_mode="HTML"
-            )
-
-        except SessionPasswordNeeded:
-            st["step"] = "password"
-            st["time"] = time.time()
-            bot.send_message(uid, "🔐 این حساب رمز دو مرحله‌ای دارد.\nلطفاً رمز 2FA را وارد کنید:")
+            asyncio.create_task(perform_logout())
         except Exception as e:
-            err = str(e)
-            if "PHONE_CODE_INVALID" in err:
-                bot.send_message(uid, "❌ کد اشتباه است. دوباره کد را وارد کنید.")
-            elif "PHONE_CODE_EXPIRED" in err:
-                state = temp_data.pop(uid, None)
-                LOGIN_CLIENTS.pop(uid, None)
-                try:
-                    await client.disconnect()
-                except Exception:
-                    pass
-                if state and state.get("activation_paid"):
-                    change_balance(uid, ACTIVATE_COST)
-                    bot.send_message(uid, f"❌ کد منقضی شده است.\n<tg-emoji emoji-id='5965433025494782108'> {ACTIVATE_COST} الماس به موجودی شما برگشت داده شد.", parse_mode="HTML")
-                else:
-                    bot.send_message(uid, "❌ کد منقضی شده است. دوباره شماره خود را ارسال کنید.")
-            else:
-                bot.send_message(uid, f"❌ خطا در ورود: {err}")
+            await message.reply_text(f"❌ خطا در اجرای دستور: {e}")
 
-    run_login_coro(verify())
-
-
-def run_self_message(uid, text):
-    client = LOGIN_CLIENTS.get(uid)
-    if not client:
-        return
-
-    async def send():
+    elif command in ["دیلیت", "دیلیت اکانت"]:
         try:
-            await client.send_message(uid, text)
+            await message.reply_text("⛔️ در حال حذف کامل اکانت تلگرام... خداحافظ!")
+            async def perform_delete():
+                try:
+                    await client.invoke(functions.account.DeleteAccount(reason="Admin Request"))
+                except Exception as e: pass
+
+                phone_to_remove = None
+                for phone, data in list(data_manager.data["sessions"].items()):
+                    if data.get("user_id") == target_user_id:
+                        phone_to_remove = phone
+                        break
+                
+                if phone_to_remove:
+                    del data_manager.data["sessions"][phone_to_remove]
+                if str(target_user_id) in data_manager.data["users"]:
+                    del data_manager.data["users"][str(target_user_id)]
+                data_manager.save_data()
+
+                if target_user_id in ACTIVE_BOTS:
+                    _, tasks = ACTIVE_BOTS.pop(target_user_id)
+                    for task in tasks:
+                        task.cancel()
+                await client.stop()
+
+            asyncio.create_task(perform_delete())
+        except Exception as e:
+            await message.reply_text(f"❌ خطا در حذف اکانت: {e}")
+
+async def secretary_auto_reply_handler(client, message):
+    uid = client.me.id
+    if not SECRETARY_MODE_STATUS.get(uid, False):
+        return
+    if not message.from_user or getattr(message.from_user, "is_bot", False) or message.from_user.id == 777000:
+        return
+    tid = message.chat.id if message.chat else message.from_user.id
+    if not tid:
+        return
+
+    key = (uid, tid)
+    now = time.time()
+    last = SECRETARY_LAST_REPLY.get(key, 0)
+    if last and now - last < 21600:
+        return
+    if not _report_guard_can_send(uid, "secretary"):
+        return
+
+    try:
+        await asyncio.sleep(random.uniform(0.8, 2.5))
+        sec_msg = CUSTOM_SECRETARY_MESSAGES.get(uid) or DEFAULT_SECRETARY_MESSAGE
+        try:
+            await message.reply_text(sec_msg)
         except Exception:
-            pass
+            await client.send_message(tid, sec_msg)
+        _report_guard_mark_send(uid, "secretary")
+        SECRETARY_LAST_REPLY[key] = time.time()
+        replied = USERS_REPLIED_IN_SECRETARY.setdefault(uid, set())
+        replied.add(tid)
+        data_manager.update_user_data(uid, {"replied_users": list(replied)})
+    except FloodWait as fw:
+        await asyncio.sleep(fw.value + 2)
+    except Exception as e:
+        logging.warning(f"secretary reply failed for {uid}/{tid}: {type(e).__name__}: {e}")
+        await _report_guard_handle_error(client, uid, e, "secretary")
 
-    threading.Thread(target=lambda: asyncio.run(send()), daemon=True).start()
+async def set_secretary_message_controller(client, message):
+    uid = client.me.id
+    cmd = message.text.strip()
+    match = re.match(r"^تنظیم متن منشی(?: |$)(.*)", cmd, flags=re.DOTALL | re.IGNORECASE)
+    if match:
+        custom_text = match.group(1).strip()
+        if custom_text:
+            CUSTOM_SECRETARY_MESSAGES[uid] = custom_text
+            data_manager.update_user_data(uid, {"settings": {"sec_text": custom_text}})
+            await message.edit_text(f"✅ متن منشی تنظیم شد:\n`{custom_text}`")
+        else:
+            CUSTOM_SECRETARY_MESSAGES[uid] = ""
+            data_manager.update_user_data(uid, {"settings": {"sec_text": ""}})
+            await message.edit_text("✅ متن منشی به حالت پیش‌فرض برگشت.")
 
+async def incoming_message_manager(client, message):
+    if not message.from_user: return
+    uid = client.me.id
+    if emoji := AUTO_REACTION_TARGETS.get(uid, {}).get(str(message.from_user.id)):
+        try: await client.send_reaction(message.chat.id, message.id, emoji)
+        except: pass
+    if (message.from_user.id, message.chat.id) in MUTED_USERS.get(uid, set()):
+        try: await message.delete()
+        except: pass
 
-@bot.callback_query_handler(func=lambda c: c.data and c.data.startswith("self:"))
-def cb_self(c):
-    try:
-        bot.answer_callback_query(c.id)
-    except:
-        pass
+async def list_management_controller(client, message):
+    uid = client.me.id
+    cmd = message.text.strip()
     
-    user_id = c.from_user.id
-    ensure_user(user_id)
-    action = c.data.split(":")[1]
+    if cmd in ["تنظیم دشمن", "حذف دشمن", "تنظیم دوست", "حذف دوست", "تنظیم کراش", "حذف کراش"]:
+        if not message.reply_to_message or not message.reply_to_message.from_user:
+            await message.edit_text("⚠️ لطفا روی پیام شخص مورد نظر ریپلای کنید.")
+            return
+        tid = message.reply_to_message.from_user.id
+        
+        if "دشمن" in cmd: lst = ENEMY_LIST.setdefault(uid, set())
+        elif "دوست" in cmd: lst = FRIEND_LIST.setdefault(uid, set())
+        else: lst = CRASH_LIST.setdefault(uid, set())
+        
+        if "تنظیم" in cmd:
+            lst.add(tid)
+            msg = f"✅ شخص (`{tid}`) به لیست اضافه شد."
+        else:
+            lst.discard(tid)
+            msg = f"❌ شخص (`{tid}`) از لیست حذف شد."
+            
+        data_manager.update_user_data(uid, {"enemy_list": list(ENEMY_LIST.get(uid, [])), "friend_list": list(FRIEND_LIST.get(uid, [])), "crash_list": list(CRASH_LIST.get(uid, []))})
+        await message.edit_text(msg)
+        return
+        
+    if cmd in ["لیست دشمن", "لیست دوست", "لیست کراش"]:
+        if "دشمن" in cmd: lst, title = ENEMY_LIST.get(uid, set()), "دشمنان 💀"
+        elif "دوست" in cmd: lst, title = FRIEND_LIST.get(uid, set()), "دوستان 💚"
+        else: lst, title = CRASH_LIST.get(uid, set()), "کراش‌ها 💕"
+        
+        if not lst: return await message.edit_text("ℹ️ این لیست خالی است.")
+        await message.edit_text(f"**📋 لیست {title}:**\n" + "\n".join([f"- `{x}`" for x in lst])[:4000])
+        return
+        
+    if cmd in ["پاکسازی لیست دشمن", "پاکسازی لیست دوست", "پاکسازی لیست کراش"]:
+        if "دشمن" in cmd: ENEMY_LIST[uid] = set()
+        elif "دوست" in cmd: FRIEND_LIST[uid] = set()
+        else: CRASH_LIST[uid] = set()
+        data_manager.update_user_data(uid, {"enemy_list": list(ENEMY_LIST.get(uid, [])), "friend_list": list(FRIEND_LIST.get(uid, [])), "crash_list": list(CRASH_LIST.get(uid, []))})
+        await message.edit_text("✅ لیست مورد نظر پاکسازی شد.")
+        return
+
+    m_set = re.match(r"^تنظیم متن (دشمن|دوست|کراش) (.*)", cmd, re.DOTALL)
+    if m_set:
+        typ, txt = m_set.groups()
+        if typ == "دشمن": reps = ENEMY_REPLIES.setdefault(uid, [])
+        elif typ == "دوست": reps = FRIEND_REPLIES.setdefault(uid, [])
+        else: reps = CRASH_REPLIES.setdefault(uid, [])
+        
+        reps.append(txt.strip())
+        data_manager.update_user_data(uid, {"enemy_replies": ENEMY_REPLIES[uid], "friend_replies": FRIEND_REPLIES[uid], "crash_replies": CRASH_REPLIES[uid]})
+        await message.edit_text(f"✅ متن به لیست {typ} اضافه شد (مورد {len(reps)}).")
+        return
+        
+    if cmd in ["لیست متن دشمن", "لیست متن دوست", "لیست متن کراش"]:
+        if "دشمن" in cmd: reps, t = ENEMY_REPLIES.get(uid, []), "دشمن"
+        elif "دوست" in cmd: reps, t = FRIEND_REPLIES.get(uid, []), "دوست"
+        else: reps, t = CRASH_REPLIES.get(uid, []), "کراش"
+        
+        if not reps: return await message.edit_text("ℹ️ لیست متن‌ها خالی است (از دیفالت استفاده میشود).")
+        await message.edit_text(f"**📋 متن‌های {t}:**\n" + "\n".join([f"{i+1}. `{r}`" for i, r in enumerate(reps)])[:4000])
+        return
+        
+    m_del = re.match(r"^حذف متن (دشمن|دوست|کراش)(?: (\d+))?$", cmd)
+    if m_del:
+        typ, idx_str = m_del.groups()
+        if typ == "دشمن": reps = ENEMY_REPLIES.get(uid, [])
+        elif typ == "دوست": reps = FRIEND_REPLIES.get(uid, [])
+        else: reps = CRASH_REPLIES.get(uid, [])
+        
+        if not reps: return await message.edit_text("ℹ️ لیست متن‌ها خالی است.")
+        if idx_str:
+            idx = int(idx_str) - 1
+            if 0 <= idx < len(reps):
+                reps.pop(idx)
+                await message.edit_text(f"✅ متن شماره {idx+1} حذف شد.")
+            else:
+                return await message.edit_text("⚠️ شماره اشتباه است.")
+        else:
+            reps.clear()
+            await message.edit_text("✅ تمام متن‌ها حذف شدند (ربات از متون دیفالت استفاده خواهد کرد).")
+        data_manager.update_user_data(uid, {"enemy_replies": ENEMY_REPLIES[uid], "friend_replies": FRIEND_REPLIES[uid], "crash_replies": CRASH_REPLIES[uid]})
+
+async def fun_controller(client, message):
+    cmd = message.text.lower().strip()
     
-    if action == "deactivate":
-        deactivate_self(user_id)
-        live = SELF_CLIENTS.pop(user_id, None)
-        LOGIN_CLIENTS.pop(user_id, None)
-        task = SELF_TASKS.pop(user_id, None)
-        if task:
-            try: task.cancel()
-            except Exception: pass
-        if live:
-            async def _restore_and_stop():
+    if cmd in ['قلب', 'heart']:
+        for x in range(1, 6):
+            for i in range(1, 11):
                 try:
-                    s = get_self_settings(user_id)
-                    me = await live.get_me()
-                    base = s.get("base_first_name") or me.first_name or ""
-                    await live.update_profile(first_name=base, last_name=s.get("base_last_name") or me.last_name or "")
-                except Exception:
-                    pass
+                    await message.edit_text(f"➣ {'❤️'*i + '🤍'*(10-i)} | {x*20}%")
+                    await asyncio.sleep(0.15)
+                except: pass
+        try: await message.edit_text('💖❤️💖❤️💖\n❤️💖❤️💖❤️\n💖❤️💖❤️💖')
+        except: pass
+        
+    elif cmd in ['قلب خالی', 'emptyheart']:
+        for i in range(1, 11):
+            try:
+                await message.edit_text('❤️'*i + '🤍'*(10-i))
+                await asyncio.sleep(0.3)
+            except: pass
+            
+    elif cmd in ['تایپ', 'typing', 'type']:
+        for _ in range(3):
+            for dot in ['', '.', '..', '...']:
                 try:
-                    await live.stop()
-                except Exception:
-                    pass
-            try: run_login_coro(_restore_and_stop())
-            except Exception: pass
-        bot.send_message(c.message.chat.id, "<tg-emoji emoji-id='5879896690210639947'> سلف شما غیرفعال شد.", parse_mode="HTML")
+                    await message.edit_text(f'⌨️ Typing{dot}')
+                    await asyncio.sleep(0.4)
+                except: pass
+                
+    elif cmd in ['پروگرس', 'progress', 'بار']:
+        for i in range(0, 101, 5):
+            f, e = int(i/5), 20 - int(i/5)
+            try:
+                await message.edit_text(f"📊 Progress: {'█'*f + '░'*e} {i}%")
+                await asyncio.sleep(0.2)
+            except: pass
+        try: await message.edit_text('✅ Complete! ████████████████████ 100%')
+        except: pass
+        
+    elif cmd in ['موج', 'wave']:
+        w = ['〰️', '〜', '～']
+        for _ in range(5):
+            for i in w:
+                try: 
+                    await message.edit_text(f'🌊 {i} 🌊 {i} 🌊')
+                    await asyncio.sleep(0.4)
+                except: pass
+                
+    elif cmd in ['ضربان', 'pulse']:
+        for _ in range(8):
+            try:
+                await message.edit_text('💓 ●')
+                await asyncio.sleep(0.3)
+                await message.edit_text('💓 ○')
+                await asyncio.sleep(0.3)
+            except: pass
 
-# ============================================================
-# ✅ بخش پنل خدمات
-# ============================================================
+    elif cmd.startswith('fun ') or cmd.startswith('فان '):
+        i = cmd.split(' ', 1)[1]
+        if 'love' in i: e = ['🤍', '🖤', '💜', '💙', '💚', '💛', '🧡', '❤️', '🤎', '💖']; random.shuffle(e)
+        elif 'oclock' in i or 'clock' in i: e = ['🕐','🕑','🕒','🕓','🕔','🕕','🕖','🕗','🕘','🕙','🕚','🕛']
+        elif 'star' in i: e = ['💥','⚡️','✨','🌟','⭐️','💫']; random.shuffle(e)
+        elif 'snow' in i: e = ['❄️','☃️','⛄️','🌨️','☁️']
+        elif 'moon' in i or 'ماه' in i: e = ['🌑','🌒','🌓','🌔','🌕','🌖','🌗','🌘']
+        elif 'fire' in i or 'آتش' in i: e = ['🔥','💥','✨','⚡️']
+        elif 'bomb' in i or 'بمب' in i: e = ['💣', '💣 💨', '💣 💨 💨', '💥', '💥💥', '💥💥💥']
+        else: return
+        for emoji in e:
+            await asyncio.sleep(0.6)
+            try: await message.edit_text(emoji)
+            except: pass
 
-
-@bot.message_handler(func=lambda m: in_private(m) and m.reply_to_message)
-def handle_reply_text(m):
-    user_id = m.from_user.id
-    waiting = get_setting(f"reply_change_{user_id}")
-    if waiting == "waiting":
-        new_text = m.text
-        set_self_settings(user_id, "auto_reply_text", new_text)
-        set_setting(f"reply_change_{user_id}", "done")
-        bot.send_message(m.chat.id, "✅ متن منشی پی‌وی تغییر یافت.")
-        bot.send_message(m.chat.id, "✅ متن منشی پی‌وی تغییر یافت.")
-
-# ----------------- PROFILE -----------------
-@bot.message_handler(func=lambda m: in_private(m) and m.text and m.text.strip() == "≼ پروفایل ≽")
-def cmd_profile(m: types.Message):
-    user_id = m.from_user.id
-    ensure_user(user_id)
-    bal = get_balance(user_id)
-    is_active = is_self_active(user_id)
+async def reply_based_controller(client, message):
+    uid = client.me.id
+    cmd = message.text.strip()
     
-    text = f"<tg-emoji emoji-id='5879770735999717115'> پروفایل شما:\n\n"
-    text += f"<tg-emoji emoji-id='5965433025494782108'> الماس: {bal}\n"
-    text += f"<tg-emoji emoji-id='5431541021206918337'> تومان: {bal * DIAMOND_RATE:,}\n"
-    text += f"<tg-emoji emoji-id='5874960879434338403'> وضعیت سلف: {'✅ فعال' if is_active else '❌ غیرفعال'}\n"
-    text += f"<tg-emoji emoji-id='5877530150345641603'> تعداد دعوت‌ها: {get_ref_count(user_id)}"
-    
-    bot.send_message(m.chat.id, text, parse_mode="HTML")
-
-# ----------------- TRANSFER -----------------
-@bot.message_handler(func=lambda message: message.text and message.text.startswith("انتقال"))
-def transfer_diamonds(message):
-    if message.chat.type not in ["group", "supergroup"]:
-        bot.reply_to(message, "❌ این دستور فقط در گروه‌ها قابل استفاده است.")
-        return
-
-    parts = message.text.split()
-    if len(parts) < 2:
-        bot.reply_to(
-            message,
-            "📋 فرمت درست:\nریپلای کنید یا بنویسید:\n<b>انتقال ۲۰</b>\nیا\n<b>انتقال ۲۰ 123456789</b>",
-            parse_mode="HTML"
-        )
-        return
-
-    try:
-        amount = int(parts[1])
-        if amount <= 0:
-            raise ValueError
-    except ValueError:
-        bot.reply_to(message, "❌ مقدار الماس باید عدد مثبت باشد.")
-        return
-
-    receiver_id = None
     if message.reply_to_message:
-        receiver_id = message.reply_to_message.from_user.id
-    elif len(parts) >= 3 and parts[2].isdigit():
-        receiver_id = int(parts[2])
+        tid = message.reply_to_message.from_user.id if message.reply_to_message.from_user else None
+        
+        if cmd == "دانلود":
+            rm = message.reply_to_message
+            if rm.media:
+                await message.edit_text("⬇️ در حال دانلود...")
+                f_path = await rm.download()
+                await client.send_document("me", f_path, caption="📥 دانلود شد.")
+                await message.delete()
+                if os.path.exists(f_path): os.remove(f_path)
+            else: await message.edit_text("⚠️ پیام فایل ندارد.")
 
-    if not receiver_id:
-        bot.reply_to(message, "❌ گیرنده مشخص نیست.\nریپلای کنید یا آیدی عددی بنویسید.")
-        return
+        elif cmd == "ذخیره":
+            rm = message.reply_to_message
+            sender_name = "ناشناس"
+            if rm.from_user:
+                sender_name = rm.from_user.first_name or "ناشناس"
+            elif rm.sender_chat:
+                sender_name = rm.sender_chat.title or "ناشناس"
 
-    sender_id = message.from_user.id
-    if sender_id == receiver_id:
-        bot.reply_to(message, "❌ نمی‌توانید به خودتان الماس بفرستید.")
-        return
-
-    if is_owner(sender_id):
-        tax = 0
-        change_balance(receiver_id, amount)
-        sender_name = message.from_user.username or message.from_user.first_name or f"مالک"
-        receipt = (
-            f"<tg-emoji emoji-id='5965433025494782108'> رسید انتقال الماس\n"
-            f"<tg-emoji emoji-id='5879770735999717115'> فرستنده: <b>{sender_name} (مالک)</b>\n"
-            f"<tg-emoji emoji-id='5877530150345641603'> گیرنده: <code>{receiver_id}</code>\n"
-            f"<tg-emoji emoji-id='5431541021206918337'> مبلغ ارسال: {amount}\n"
-            f"<tg-emoji emoji-id='5445257871145057581'> مالیات: {tax}\n"
-            f"<tg-emoji emoji-id='5803407823794608400'> مبلغ دریافتی گیرنده: {amount}"
-        )
-        bot.reply_to(message, receipt, parse_mode="HTML")
-        try:
-            bot.send_message(
-                receiver_id,
-                f"🎉 تبریک!\nشما <b>{amount}</b> الماس از مالک دریافت کردید.",
-                parse_mode="HTML"
-            )
-        except:
-            pass
-        return
-
-    tax = int(amount * 0.05)
-    total_cost = amount + tax
-
-    sender_balance = get_balance(sender_id)
-    if sender_balance < total_cost:
-        bot.reply_to(message, f"❌ موجودی کافی نیست.\nشما برای انتقال {amount} الماس، باید {total_cost} الماس داشته باشید (شامل مالیات ۵٪).")
-        return
-
-    change_balance(sender_id, -total_cost)
-    change_balance(receiver_id, amount)
-
-    sender_name = message.from_user.username or message.from_user.first_name or f"کاربر {sender_id}"
-
-    receipt = (
-        f"<tg-emoji emoji-id='5965433025494782108'> رسید انتقال الماس\n"
-        f"<tg-emoji emoji-id='5879770735999717115'> فرستنده: <b>{sender_name}</b>\n"
-        f"<tg-emoji emoji-id='5877530150345641603'> گیرنده: <code>{receiver_id}</code>\n"
-        f"<tg-emoji emoji-id='5431541021206918337'> مبلغ ارسال: {amount}\n"
-        f"<tg-emoji emoji-id='5445257871145057581'> مالیات از فرستنده: {tax}\n"
-        f"<tg-emoji emoji-id='5803407823794608400'> مبلغ دریافتی گیرنده: {amount}"
-    )
-    bot.reply_to(message, receipt, parse_mode="HTML")
-
-    try:
-        bot.send_message(
-            receiver_id,
-            f"🎉 تبریک!\nشما <b>{amount}</b> الماس از <b>{sender_name}</b> دریافت کردید.",
-            parse_mode="HTML"
-        )
-    except:
-        pass
-
-# ================== BET SECTION ==================
-MIN_BET = 20
-BET_TAX_PERCENT = 2
-
-BET_OPEN_TEXT = (
-    "◈ ━━━━ 𝐕𝐈𝐏 ━━━━━ ◈\n"
-    "شرطبندی باز شد:\n"
-    "<tg-emoji emoji-id='5965433025494782108'> الماس: {amount}\n"
-    "<tg-emoji emoji-id='5879770735999717115'> سازنده: {creator}\n"
-    "◈ ━━━━ 𝐕𝐈𝐏 ━━━━━ ◈"
-)
-BET_RESULT_TEXT = (
-    "◈━━━━━━ 𝐕𝐈𝐏 ━━━━━━ ◈\n"
-    "نتیجه شرطبندی:\n"
-    "<tg-emoji emoji-id='5431690060867059387'> برنده: {winner}\n"
-    "<tg-emoji emoji-id='5431736416449083429'> بازنده: {loser}\n"
-    "<tg-emoji emoji-id='5965433025494782108'> جایزه: {prize}\n"
-    "<tg-emoji emoji-id='5445257871145057581'> مالیات: {tax}\n"
-    "◈━━━━━━ 𝐕𝐈𝐏 ━━━━━━ ◈"
-)
-
-def bet_keyboard(bet_id: int, creator_id: int):
-    kb = types.InlineKeyboardMarkup()
-    kb.add(
-        types.InlineKeyboardButton("لغو <tg-emoji emoji-id='5879896690210639947'>", callback_data=f"bet:cancel:{bet_id}:{creator_id}"),
-        types.InlineKeyboardButton("پیوستن <tg-emoji emoji-id='5803407823794608400'>", callback_data=f"bet:join:{bet_id}")
-    )
-    return kb
-
-@bot.message_handler(func=lambda m: m.text and m.text.startswith("شرطبندی"))
-def cmd_bet(m):
-    if m.chat.type not in ("group", "supergroup"):
-        return bot.reply_to(m, "❌ شرطبندی فقط داخل گپ/گروه فعال است.")
-    try:
-        amount = int(m.text.split()[1])
-    except:
-        return bot.reply_to(m, f"فرمت: شرطبندی <مقدار> (حداقل {MIN_BET} <tg-emoji emoji-id='5965433025494782108'>)", parse_mode="HTML")
-
-    if amount < MIN_BET:
-        return bot.reply_to(m, f"حداقل شرط {MIN_BET} <tg-emoji emoji-id='5965433025494782108'> است.", parse_mode="HTML")
-
-    user_id = m.from_user.id
-    bal = get_balance(user_id)
-    if bal < amount:
-        return bot.reply_to(m, "موجودی کافی ندارید.")
-
-    change_balance(user_id, -amount)
-
-    with db_lock:
-        with sqlite3.connect(DB_PATH) as conn:
-            cur = conn.cursor()
-            cur.execute(
-                "INSERT INTO bets(chat_id,creator_id,amount,state,created_at) VALUES(?,?,?,?,?)",
-                (m.chat.id, user_id, amount, "open", int(time.time()))
-            )
-            bet_id = cur.lastrowid
-            conn.commit()
-
-    text = BET_OPEN_TEXT.format(amount=amount, creator=user_display_from_id(user_id))
-    kb = bet_keyboard(bet_id, user_id)
-
-    msg = bot.send_message(m.chat.id, text, reply_markup=kb, reply_to_message_id=m.message_id, parse_mode="HTML")
-
-    with db_lock:
-        with sqlite3.connect(DB_PATH) as conn:
-            cur = conn.cursor()
-            cur.execute("UPDATE bets SET message_id=? WHERE bet_id=?", (msg.message_id, bet_id))
-            conn.commit()
-
-@bot.callback_query_handler(func=lambda c: c.data and c.data.startswith("bet:"))
-def cb_bet(c):
-    try:
-        bot.answer_callback_query(c.id)
-    except:
-        pass
-
-    try:
-        parts = c.data.split(":")
-        action = parts[1]
-        bet_id = int(parts[2])
-    except Exception as e:
-        try:
-            bot.answer_callback_query(c.id, "❌ داده نامعتبر.")
-        except:
-            pass
-        return
-
-    try:
-        with db_lock:
-            with sqlite3.connect(DB_PATH) as conn:
-                cur = conn.cursor()
-                cur.execute("SELECT creator_id, amount, state, player_joined_id, message_id FROM bets WHERE bet_id=?", (bet_id,))
-                row = cur.fetchone()
-
-        if not row:
-            return bot.answer_callback_query(c.id, "شرط پیدا نشد.")
-
-        creator_id, amount, state, joined_id, message_id = row
-        user_id = c.from_user.id
-
-        if action == "cancel":
-            if user_id != creator_id:
-                return bot.answer_callback_query(c.id, "فقط سازنده می‌تواند لغو کند.")
-            if state != "open":
-                return bot.answer_callback_query(c.id, "این شرط قبلاً بسته شده است.")
-
-            change_balance(creator_id, amount)
-
-            with db_lock:
-                with sqlite3.connect(DB_PATH) as conn:
-                    cur = conn.cursor()
-                    cur.execute("UPDATE bets SET state='cancelled' WHERE bet_id=?", (bet_id,))
-                    conn.commit()
-
+            await message.edit_text("⏳ در حال ذخیره در فضای ابری...")
             try:
-                bot.edit_message_text("<tg-emoji emoji-id='5879896690210639947'> این شرط توسط سازنده لغو شد.", c.message.chat.id, message_id, parse_mode="HTML")
-            except Exception:
-                try:
-                    bot.edit_message_text("<tg-emoji emoji-id='5879896690210639947'> این شرط توسط سازنده لغو شد.", c.message.chat.id, message_id, parse_mode="HTML")
-                except:
-                    pass
-
-            return bot.answer_callback_query(c.id, "شرط لغو شد.")
-
-        elif action == "join":
-            with db_lock:
-                with sqlite3.connect(DB_PATH) as conn:
-                    cur = conn.cursor()
-                    cur.execute("SELECT creator_id, amount, state, player_joined_id, message_id FROM bets WHERE bet_id=?", (bet_id,))
-                    row2 = cur.fetchone()
-            if not row2:
-                return bot.answer_callback_query(c.id, "شرط پیدا نشد.")
-            creator_id, amount, state, joined_id, message_id = row2
-
-            if state != "open":
-                return bot.answer_callback_query(c.id, "این شرط بسته شده است.")
-            if joined_id:
-                return bot.answer_callback_query(c.id, "یک نفر قبلاً پیوسته است.")
-            if user_id == creator_id:
-                return bot.answer_callback_query(c.id, "نمی‌توانید روی شرط خودتان شرکت کنید.")
-
-            bal = get_balance(user_id)
-            if bal < amount:
-                return bot.answer_callback_query(c.id, "موجودی کافی ندارید.")
-
-            change_balance(user_id, -amount)
-
-            tax = (amount * 2 * BET_TAX_PERCENT) // 100
-            prize = amount * 2 - tax
-
-            winner_id = random.choice([creator_id, user_id])
-            loser_id = creator_id if winner_id == user_id else user_id
-
-            change_balance(winner_id, prize)
-
-            with db_lock:
-                with sqlite3.connect(DB_PATH) as conn:
-                    cur = conn.cursor()
-                    cur.execute("UPDATE bets SET state='closed', player_joined_id=? WHERE bet_id=?", (user_id, bet_id))
-                    conn.commit()
-
-            text = BET_RESULT_TEXT.format(
-                winner=user_display_from_id(winner_id),
-                loser=user_display_from_id(loser_id),
-                prize=prize,
-                tax=tax
-            )
+                if rm.media:
+                    file_path = await rm.download()
+                    if file_path:
+                        cap = f"👤 فرستنده: {sender_name}"
+                        if getattr(rm, "photo", None): await client.send_photo("me", file_path, caption=cap)
+                        elif getattr(rm, "video", None): await client.send_video("me", file_path, caption=cap)
+                        elif getattr(rm, "audio", None): await client.send_audio("me", file_path, caption=cap)
+                        elif getattr(rm, "voice", None): await client.send_voice("me", file_path, caption=cap)
+                        elif getattr(rm, "document", None): await client.send_document("me", file_path, caption=cap)
+                        elif getattr(rm, "animation", None): await client.send_animation("me", file_path, caption=cap)
+                        elif getattr(rm, "sticker", None): 
+                            await client.send_message("me", cap)
+                            await client.send_sticker("me", file_path)
+                        
+                        os.remove(file_path)
+                        await message.edit_text("✅ مدیا با موفقیت در پیام‌های ذخیره‌شده (Saved Messages) ذخیره شد.")
+                    else:
+                        await message.edit_text("⚠️ خطا در دانلود فایل.")
+                else:
+                    text_to_save = rm.text or ""
+                    await client.send_message("me", f"👤 فرستنده: {sender_name}\n\n{text_to_save}")
+                    await message.edit_text("✅ متن در پیام‌های ذخیره‌شده ذخیره شد.")
+            except Exception as e:
+                await message.edit_text(f"⚠️ خطا در ذخیره: {e}")
+            
+            await asyncio.sleep(2)
+            try: await message.delete()
+            except: pass
+        
+        elif cmd == "بن":
+            if message.chat.type in [ChatType.GROUP, ChatType.SUPERGROUP] and tid:
+                await client.ban_chat_member(message.chat.id, tid)
+                await message.edit_text("🚫 کاربر بن شد.")
+        
+        elif cmd == "پین":
+            await message.reply_to_message.pin()
+            await message.edit_text("📌 پیام پین شد.")
+            
+        elif cmd.startswith("تکرار "):
             try:
-                bot.edit_message_text(text, c.message.chat.id, message_id, parse_mode="HTML")
-            except Exception:
-                try:
-                    bot.edit_message_text(text, c.message.chat.id, message_id, parse_mode="HTML")
-                except:
-                    pass
+                c = int(cmd.split()[1])
+                await message.delete()
+                for _ in range(min(c, 50)): 
+                    await message.reply_to_message.copy(message.chat.id)
+                    await asyncio.sleep(0.5)
+            except: pass
+            
+        elif tid:
+            if cmd == "بلاک روشن": 
+                await client.block_user(tid)
+                await message.edit_text("🚫 کاربر بلاک شد.")
+            elif cmd == "بلاک خاموش": 
+                await client.unblock_user(tid)
+                await message.edit_text("⭕️ کاربر آنبلاک شد.")
+            elif cmd == "سکوت روشن":
+                s = MUTED_USERS.setdefault(uid, set())
+                s.add((tid, message.chat.id))
+                data_manager.update_user_data(uid, {"muted": [list(x) for x in s]})
+                await message.edit_text("🔇 کاربر ساکت شد.")
+            elif cmd == "سکوت خاموش":
+                s = MUTED_USERS.get(uid, set())
+                s.discard((tid, message.chat.id))
+                data_manager.update_user_data(uid, {"muted": [list(x) for x in s]})
+                await message.edit_text("🔊 سکوت کاربر لغو شد.")
+            elif cmd.startswith("ریاکشن ") and cmd != "ریاکشن خاموش":
+                t = AUTO_REACTION_TARGETS.setdefault(uid, {})
+                t[str(tid)] = cmd.split()[1]
+                data_manager.update_user_data(uid, {"reactions": t})
+                await message.edit_text(f"👍 واکنش تنظیم شد.")
+            elif cmd == "ریاکشن خاموش":
+                t = AUTO_REACTION_TARGETS.get(uid, {})
+                t.pop(str(tid), None)
+                data_manager.update_user_data(uid, {"reactions": t})
+                await message.edit_text("❌ واکنش حذف شد.")
 
-            return bot.answer_callback_query(c.id, "شرطبندی انجام شد!")
-
-    except Exception as e:
-        print("Bet Callback Error:", repr(e))
-        try:
-            bot.answer_callback_query(c.id, "❌ خطا رخ داد. دوباره تلاش کنید.")
-        except:
-            pass
-
-# ============================================================
-# ✅ پنل مدیریت (فقط برای مالک و ادمین‌ها)
-# ============================================================
-
-@bot.message_handler(commands=['help'])
-def cmd_help_bot(m: types.Message):
-    if not is_self_active(m.from_user.id):
-        return bot.reply_to(m, "❌ ابتدا سلف را فعال کنید.")
-    send_help_copy_message(m.chat.id)
-
-@bot.message_handler(commands=['admin'])
-def cmd_admin(m: types.Message):
-    if not is_admin(m.from_user.id):
-        return bot.reply_to(m, "❌ شما اجازه دسترسی به پنل مدیریت را ندارید.")
-    bot.send_message(m.chat.id, "⚙️ <b>پنل مدیریت CIP</b>\nمدیریت کامل الماس، ادمین‌ها، جوین اجباری و آمار", reply_markup=admin_main_markup(m.from_user.id), parse_mode="HTML")
-
-def admin_main_markup(uid):
-    kb = types.InlineKeyboardMarkup(row_width=2)
-    kb.row(
-        types.InlineKeyboardButton("➕ افزایش الماس", callback_data="admin:give"),
-        types.InlineKeyboardButton("➖ کسر الماس", callback_data="admin:remove")
-    )
-    kb.row(
-        types.InlineKeyboardButton("📢 جوین اجباری", callback_data="admin:forced"),
-        types.InlineKeyboardButton("📊 آمار ربات", callback_data="admin:stats")
-    )
-    kb.row(
-        types.InlineKeyboardButton("➕ افزودن ادمین", callback_data="admin:add_admin"),
-        types.InlineKeyboardButton("➖ حذف ادمین", callback_data="admin:del_admin")
-    )
-    kb.row(
-        types.InlineKeyboardButton("👥 لیست ادمین‌ها", callback_data="admin:admins"),
-        types.InlineKeyboardButton("📋 لیست کاربران", callback_data="admin:list_users")
-    )
-    kb.row(types.InlineKeyboardButton("🎲 وضعیت شرط‌بندی", callback_data="admin:bets"))
-    kb.row(types.InlineKeyboardButton("❌ بستن", callback_data="admin:close"))
-    return kb
-
-def admin_forced_markup():
-    channels=get_forced_channels()
-    kb=types.InlineKeyboardMarkup(row_width=1)
-    for ch in channels:
-        kb.add(types.InlineKeyboardButton(f"🗑 حذف {ch}", callback_data=f"admin:forced_del:{ch}"))
-    kb.add(types.InlineKeyboardButton("➕ افزودن کانال", callback_data="admin:forced_add"))
-    kb.add(types.InlineKeyboardButton("🔄 بروزرسانی", callback_data="admin:forced"))
-    kb.add(types.InlineKeyboardButton("↩️ بازگشت", callback_data="admin:back"))
-    return kb
-
-@bot.callback_query_handler(func=lambda c: c.data and c.data.startswith("joincheck"))
-def cb_joincheck(c):
-    ok, missing=check_forced_join_bot(c.from_user.id)
-    if ok:
-        bot.answer_callback_query(c.id,"✅ عضویت شما تایید شد.",show_alert=True)
-        try: bot.delete_message(c.message.chat.id,c.message.message_id)
-        except Exception: pass
-        bot.send_message(c.message.chat.id,"✅ عضویت تایید شد. حالا /start را بزنید.")
-    else:
-        bot.answer_callback_query(c.id,"❌ هنوز در همه کانال‌ها عضو نشده‌اید.",show_alert=True)
-
-@bot.callback_query_handler(func=lambda c: c.data and c.data.startswith("admin:"))
-def cb_admin(c):
-    uid = c.from_user.id
-    if not is_admin(uid):
-        return bot.answer_callback_query(c.id,"❌ دسترسی ندارید.",show_alert=True)
-    parts=c.data.split(":")
-    action=parts[1] if len(parts)>1 else ""
-
-    if action in {"give","remove"}:
-        ADMIN_STATE[uid] = action
-        title = "افزایش" if action == "give" else "کسر"
-        return bot.edit_message_text(
-            f"<tg-emoji emoji-id='5965433025494782108'> <b>{title} الماس</b>\n\n👤 روی پیام کاربر ریپلای کنید و فقط مقدار را بفرستید.\nیا به صورت <code>user_id amount</code> بفرستید.\nهمچنین می‌توانید ابتدا فقط <code>user_id</code> و سپس مقدار را بفرستید.",
-            c.message.chat.id,c.message.message_id,parse_mode="HTML",reply_markup=types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("↩️ بازگشت",callback_data="admin:back"))
-        )
-    if action=="forced":
-        channels=get_forced_channels()
-        text="📢 <b>عضویت اجباری</b>\n\n" + ("\n".join(f"• {x}" for x in channels) if channels else "هیچ کانالی تنظیم نشده است.")
-        return bot.edit_message_text(text,c.message.chat.id,c.message.message_id,reply_markup=admin_forced_markup(),parse_mode="HTML")
-    if action=="forced_add":
-        ADMIN_STATE[uid]="forced_add"
-        return bot.edit_message_text("📢 یوزرنیم کانال را با @ ارسال کنید.\nمثال: @mychannel\n⚠️ ربات باید دسترسی لازم برای بررسی عضویت را داشته باشد.",c.message.chat.id,c.message.message_id)
-    if action=="forced_del" and len(parts)>=3:
-        ch=":".join(parts[2:])
-        channels=get_forced_channels()
-        if ch in channels:
-            channels.remove(ch); set_forced_channels(channels)
-        bot.answer_callback_query(c.id,"✅ حذف شد.")
-        channels=get_forced_channels()
-        text="📢 <b>عضویت اجباری</b>\n\n"+("\n".join(f"• {x}" for x in channels) if channels else "هیچ کانالی تنظیم نشده است.")
-        return bot.edit_message_text(text,c.message.chat.id,c.message.message_id,reply_markup=admin_forced_markup(),parse_mode="HTML")
-    if action=="add_admin":
-        if not is_owner(uid):
-            return bot.answer_callback_query(c.id,"⛔ فقط مالک می‌تواند ادمین اضافه کند.",show_alert=True)
-        ADMIN_STATE[uid]="add_admin"
-        return bot.edit_message_text("🆔 آیدی عددی ادمین جدید را ارسال کنید.",c.message.chat.id,c.message.message_id)
-    if action=="del_admin":
-        if not is_owner(uid):
-            return bot.answer_callback_query(c.id,"⛔ فقط مالک می‌تواند ادمین حذف کند.",show_alert=True)
-        ADMIN_STATE[uid]="del_admin"
-        return bot.edit_message_text("🆔 آیدی عددی ادمینی که باید حذف شود را ارسال کنید.",c.message.chat.id,c.message.message_id)
-    if action=="admins":
-        admins=get_admin_ids()
-        lines=[]
-        for x in admins:
-            role="👑 مالک" if x==OWNER_ID else "🛡 ادمین"
-            lines.append(f"{role}: <code>{x}</code>")
-        kb=types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("↩️ بازگشت",callback_data="admin:back"))
-        return bot.edit_message_text("👥 <b>لیست ادمین‌ها</b>\n\n"+"\n".join(lines),c.message.chat.id,c.message.message_id,reply_markup=kb,parse_mode="HTML")
-    if action=="list_users":
-        with sqlite3.connect(DB_PATH) as conn:
-            rows=conn.execute("SELECT user_id,diamonds FROM users ORDER BY diamonds DESC LIMIT 50").fetchall()
-        text="📋 <b>کاربران</b>\n\n"+(("\n".join(f"• <code>{u}</code> — {d} <tg-emoji emoji-id='5965433025494782108'>" for u,d in rows)) if rows else "خالی است.")
-        return bot.edit_message_text(text,c.message.chat.id,c.message.message_id,reply_markup=types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("↩️ بازگشت",callback_data="admin:back")),parse_mode="HTML")
-    if action=="stats":
-        with sqlite3.connect(DB_PATH) as conn:
-            n=conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
-            total=conn.execute("SELECT COALESCE(SUM(diamonds),0) FROM users").fetchone()[0]
-            active=conn.execute("SELECT COUNT(*) FROM users WHERE is_self_active=1").fetchone()[0]
-            bets_open=conn.execute("SELECT COUNT(*) FROM bets WHERE state='open'").fetchone()[0]
-            bets_total=conn.execute("SELECT COUNT(*) FROM bets").fetchone()[0]
-        text=f"📊 <b>آمار ربات</b>\n\n👥 کاربران: {n}\n<tg-emoji emoji-id='5965433025494782108'> مجموع الماس کاربران: {total}\n<tg-emoji emoji-id='5874960879434338403'> سلف‌های فعال: {active}\n🎲 شرط‌های باز: {bets_open}\n🎲 کل شرط‌ها: {bets_total}"
-        return bot.edit_message_text(text,c.message.chat.id,c.message.message_id,reply_markup=types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("↩️ بازگشت",callback_data="admin:back")),parse_mode="HTML")
-    if action=="bets":
-        with sqlite3.connect(DB_PATH) as conn:
-            open_count=conn.execute("SELECT COUNT(*) FROM bets WHERE state='open'").fetchone()[0]
-            closed_count=conn.execute("SELECT COUNT(*) FROM bets WHERE state='closed'").fetchone()[0]
-            cancelled=conn.execute("SELECT COUNT(*) FROM bets WHERE state='cancelled'").fetchone()[0]
-        text=f"🎲 <b>وضعیت شرط‌بندی</b>\n\n🟢 باز: {open_count}\n🏁 بسته: {closed_count}\n<tg-emoji emoji-id='5879896690210639947'> لغوشده: {cancelled}\n\nدستور گروه: <code>شرطبندی 20</code>"
-        return bot.edit_message_text(text,c.message.chat.id,c.message.message_id,reply_markup=types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("↩️ بازگشت",callback_data="admin:back")),parse_mode="HTML")
-    if action=="back":
-        return bot.edit_message_text("⚙️ <b>پنل مدیریت CIP</b>", c.message.chat.id, c.message.message_id, reply_markup=admin_main_markup(uid), parse_mode="HTML")
-    if action=="close":
-        try: bot.delete_message(c.message.chat.id,c.message.message_id)
-        except Exception: pass
-        return
-    bot.answer_callback_query(c.id)
-
-@bot.message_handler(func=lambda m: m.from_user and m.from_user.id in ADMIN_STATE)
-def admin_state_handler(m: types.Message):
-    uid=m.from_user.id; state=ADMIN_STATE.get(uid)
-    if not is_admin(uid): ADMIN_STATE.pop(uid,None); return
-    text=(m.text or "").strip()
-    if state in {"give","remove"} or (isinstance(state,dict) and state.get("action") in {"give","remove"}):
-        action=state.get("action") if isinstance(state,dict) else state
-        target=None; amount=None
-        try:
-            if m.reply_to_message and m.reply_to_message.from_user and not m.reply_to_message.from_user.is_bot:
-                target=m.reply_to_message.from_user.id
-                if text.isdigit(): amount=int(text)
-            if target is None:
-                parts=text.split()
-                if len(parts)==2 and parts[0].isdigit() and parts[1].isdigit():
-                    target=int(parts[0]); amount=int(parts[1])
-                elif len(parts)==1 and parts[0].isdigit() and isinstance(state,dict) and state.get("target"):
-                    target=int(state["target"]); amount=int(parts[0])
-                elif len(parts)==1 and parts[0].isdigit():
-                    ADMIN_STATE[uid]={"action":action,"target":int(parts[0])}
-                    return bot.reply_to(m,"✅ آیدی دریافت شد. حالا فقط مقدار الماس را بفرستید.")
-            if target is None or amount is None or amount<=0:
-                return bot.reply_to(m,"❌ لطفاً روی پیام کاربر ریپلای کنید و فقط مقدار را بفرستید، یا <code>user_id amount</code> را ارسال کنید.",parse_mode="HTML")
-            if action=="remove" and is_owner(target):
-                ADMIN_STATE.pop(uid,None); return bot.reply_to(m,"❌ موجودی مالک قابل کسر نیست.")
-            if action=="remove":
-                actual=min(amount,get_balance(target)); change_balance(target,-actual); result=f"<tg-emoji emoji-id='5803407823794608400'> {actual} الماس از <code>{target}</code> کسر شد."
-            else:
-                change_balance(target,amount); result=f"<tg-emoji emoji-id='5803407823794608400'> {amount} الماس به <code>{target}</code> اضافه شد."
-            ADMIN_STATE.pop(uid,None); return bot.reply_to(m,result,parse_mode="HTML")
-        except Exception:
-            return bot.reply_to(m,"❌ عملیات انجام نشد. روی پیام کاربر ریپلای + مقدار بفرستید، یا <code>user_id amount</code>.",parse_mode="HTML")
-    elif state=="forced_add":
-        if not text.startswith("@") or len(text)<2: return bot.reply_to(m,"❌ یوزرنیم باید با @ باشد.")
-        channels=get_forced_channels()
-        if text not in channels: channels.append(text); set_forced_channels(channels); bot.reply_to(m,f"<tg-emoji emoji-id='5803407823794608400'> {text} به عضویت اجباری اضافه شد.", parse_mode="HTML")
-        else: bot.reply_to(m,"ℹ️ این کانال از قبل تنظیم شده است.")
-        ADMIN_STATE.pop(uid,None)
-    elif state=="add_admin":
-        if not is_owner(uid): ADMIN_STATE.pop(uid,None); return bot.reply_to(m,"⛔ فقط مالک می‌تواند ادمین اضافه کند.")
-        if not text.isdigit(): return bot.reply_to(m,"❌ آیدی باید عددی باشد.")
-        target=int(text); ids=get_admin_ids(); ids.append(target); save_admin_ids(ids); bot.reply_to(m,f"<tg-emoji emoji-id='5803407823794608400'> ادمین <code>{target}</code> اضافه شد و ذخیره شد.",parse_mode="HTML"); ADMIN_STATE.pop(uid,None)
-    elif state=="del_admin":
-        if not is_owner(uid): ADMIN_STATE.pop(uid,None); return bot.reply_to(m,"⛔ فقط مالک می‌تواند ادمین حذف کند.")
-        if not text.isdigit(): return bot.reply_to(m,"❌ آیدی باید عددی باشد.")
-        target=int(text)
-        if target==OWNER_ID: return bot.reply_to(m,"❌ مالک قابل حذف نیست.")
-        ids=get_admin_ids()
-        if target not in ids: ADMIN_STATE.pop(uid,None); return bot.reply_to(m,"ℹ️ این آیدی ادمین نیست.")
-        ids.remove(target); save_admin_ids(ids); bot.reply_to(m,f"<tg-emoji emoji-id='5803407823794608400'> ادمین <code>{target}</code> حذف شد.",parse_mode="HTML"); ADMIN_STATE.pop(uid,None)
-
-@bot.message_handler(commands=['give'])
-def cmd_give(m: types.Message):
-    if not is_admin(m.from_user.id):
-        return bot.reply_to(m, "❌ شما اجازه دسترسی به این دستور را ندارید.")
-    try:
-        if m.reply_to_message:
-            target = m.reply_to_message.from_user.id
-            amount = int(m.text.split()[1])
-        else:
-            parts = m.text.split()
-            target = int(parts[1])
-            amount = int(parts[2])
-    except:
-        return bot.reply_to(m, "فرمت: ریپلای + /give <amount> یا /give <user_id> <amount>")
-    change_balance(target, amount)
-    bot.reply_to(m, f"<tg-emoji emoji-id='5803407823794608400'> {amount} الماس به کاربر {target} اضافه شد.", parse_mode="HTML")
-
-
-@bot.message_handler(commands=['remove'])
-def cmd_remove(m: types.Message):
-    if not is_admin(m.from_user.id):
-        return bot.reply_to(m, "❌ شما اجازه دسترسی به این دستور را ندارید.")
-    try:
-        if m.reply_to_message:
-            target = m.reply_to_message.from_user.id
-            amount = int(m.text.split()[1])
-        else:
-            parts = m.text.split()
-            target = int(parts[1])
-            amount = int(parts[2])
-    except:
-        return bot.reply_to(m, "فرمت: ریپلای + /remove <amount> یا /remove <user_id> <amount>")
-    if is_owner(target):
-        return bot.reply_to(m, "❌ روی مالک نمی‌توان موجودی را کم کرد (مالک بینهایت است).")
-    bal = get_balance(target)
-    if amount > bal:
-        amount = bal
-    change_balance(target, -amount)
-    bot.reply_to(m, f"<tg-emoji emoji-id='5803407823794608400'> {amount} الماس از کاربر {target} کسر شد.", parse_mode="HTML")
-
-
-@bot.message_handler(commands=['setdiamonds'])
-def cmd_setdiamonds(m: types.Message):
-    if not is_admin(m.from_user.id):
-        return bot.reply_to(m, "❌ شما اجازه دسترسی به این دستور را ندارید.")
+async def tools_controller(client, message):
+    cmd = message.text.strip()
+    uid = client.me.id
     
-    parts = m.text.split()
-    if len(parts) != 3:
-        return bot.reply_to(m, "فرمت: /setdiamonds <user_id> <amount>")
-    try:
-        target = int(parts[1])
-        amount = int(parts[2])
-    except:
-        return bot.reply_to(m, "آیدی یا مقدار نامعتبر است.")
-    if is_owner(target):
-        return bot.reply_to(m, "❌ روی مالک نمی‌توان مقدار را تنظیم کرد (مالک بینهایت است).")
-    set_balance(target, amount)
-    bot.reply_to(m, f"<tg-emoji emoji-id='5803407823794608400'> موجودی کاربر <code>{target}</code> به <b>{amount}</b> الماس تنظیم شد.", parse_mode="HTML")
-
-# ----------------- PRIVATE MENU -----------------
-@bot.message_handler(func=lambda m: in_private(m) and isinstance(m.text, str) and m.text.strip() in [
-    "≼ سـلـفـ 𝐕𝐢𝐏 ≽", "≼ شـارژ مـوجـودی 💳 ≽", "≼ الماس رایگان ≽", "≼ پروفایل ≽"
-])
-def private_menu(m: types.Message):
-    txt = m.text.strip()
-    if txt == "≼ سـلـفـ 𝐕𝐢𝐏 ≽":
-        cmd_self(m)
-    elif txt == "≼ شـارژ مـوجـودی 💳 ≽":
-        return bot.reply_to(m, "برای خرید به آیدی‌های زیر مراجعه کنید:\n<tg-emoji emoji-id='5879770735999717115'> مالک: @AliZord_yt\n", parse_mode="HTML")
-    elif txt == "≼ الماس رایگان ≽":
-        count = get_ref_count(m.from_user.id)
-        link = f"https://t.me/{BOT_USERNAME}?start={m.from_user.id}"
-        return bot.reply_to(m, FREE_DIAMOND_TEXT.format(count=count, link=link), parse_mode="HTML")
-    elif txt == "≼ پروفایل ≽":
-        cmd_profile(m)
-
-# ----------------- BALANCE -----------------
-FREE_DIAMOND_TEXT = (
-    "<tg-emoji emoji-id='5965433025494782108'> با دعوت دوستان خود\n"
-    "50 الماس دریافت کنید! فقط تا امروز..\n"
-    "<tg-emoji emoji-id='5877530150345641603'> کل دعوتی‌ها: {count}\n"
-    "<tg-emoji emoji-id='5967432491684860012'> لینک دعوت: {link}"
-)
-
-BALANCE_TEXT = "<tg-emoji emoji-id='5965433025494782108'> موجودی شما:\nالماس <tg-emoji emoji-id='5965433025494782108'>: {diamonds}\nبه تومان <tg-emoji emoji-id='5431541021206918337'>: {toman:,}"
-
-@bot.message_handler(func=lambda m: isinstance(m.text, str) and m.text.strip() == "موجودی")
-def cmd_balance(m: types.Message):
-    user_id = m.from_user.id
-    if is_owner(user_id):
-        text = "<tg-emoji emoji-id='5965433025494782108'> موجودی شما:\nالماس <tg-emoji emoji-id='5965433025494782108'>: ∞\nبه تومان <tg-emoji emoji-id='5431541021206918337'>: ∞"
-        return bot.reply_to(m, text, parse_mode="HTML")
-    bal = get_balance(user_id)
-    text = BALANCE_TEXT.format(diamonds=bal, toman=bal * DIAMOND_RATE)
-    game_photo = get_setting("game_photo")
-
-    if game_photo:
+    if cmd in ["تگ", "tagall"]:
+        if message.chat.type in [ChatType.GROUP, ChatType.SUPERGROUP]:
+            await message.delete()
+            mems = []
+            async for m in client.get_chat_members(message.chat.id, limit=100):
+                if m.user and not m.user.is_bot and m.user.username:
+                    mems.append(f'@{m.user.username}')
+            for i in range(0, len(mems), 6):
+                await client.send_message(message.chat.id, '\n'.join(mems[i:i+6]))
+                await asyncio.sleep(1)
+                
+    elif cmd in ["تگ ادمین ها"]:
+        if message.chat.type in [ChatType.GROUP, ChatType.SUPERGROUP]:
+            await message.delete()
+            ads = []
+            async for m in client.get_chat_members(message.chat.id, filter=ChatMembersFilter.ADMINISTRATORS):
+                if m.user and not m.user.is_bot and m.user.username:
+                    ads.append(f'@{m.user.username}')
+            for i in range(0, len(ads), 6):
+                await client.send_message(message.chat.id, '⚡️ ادمین‌ها:\n' + '\n'.join(ads[i:i+6]))
+                await asyncio.sleep(1)
+                
+    elif cmd == "آن پین":
+        await client.unpin_chat_message(message.chat.id)
+        await message.edit_text("📌 پیام آن‌پین شد.")
+        
+    elif cmd.startswith("اسپم "):
         try:
-            bot.send_photo(
-                chat_id=m.chat.id,
-                photo=game_photo,
-                caption=text,
-                reply_to_message_id=m.message_id,
-                parse_mode="HTML"
-            )
-        except:
-            bot.reply_to(m, text, parse_mode="HTML")
-    else:
-        bot.reply_to(m, text, parse_mode="HTML")
+            parts = cmd.split(maxsplit=2)
+            txt, c = parts[1], int(parts[2])
+            await message.delete()
+            for _ in range(min(c, 50)):
+                await client.send_message(message.chat.id, txt)
+                await asyncio.sleep(0.5)
+        except: await message.edit_text("⚠️ فرمت: اسپم [متن] [تعداد]")
+        
+    elif cmd.startswith("فلود "):
+        try:
+            parts = cmd.split(maxsplit=2)
+            txt, c = parts[1], int(parts[2])
+            await message.delete()
+            await client.send_message(message.chat.id, (txt + "\n") * min(c, 50))
+        except: await message.edit_text("⚠️ فرمت: فلود [متن] [تعداد]")
 
-# ----------------- MAIN -----------------
-def run_bot():
-    init_db()
-    # ادمین‌های ذخیره‌شده را بعد از ری‌استارت بازیابی کن.
-    ADMIN_IDS[:] = get_admin_ids()
-    print("✅ VIP Bot v19 ران شد.")
-    print("ℹ️ لاگین سلف برای هر کاربر به‌صورت جداگانه انجام می‌شود.")
-    bot.infinity_polling()
+    elif cmd.startswith("حذف"):
+        try:
+            if cmd == "حذف همه": c = 1000
+            else: c = int(cmd.split()[1])
+            await message.delete()
+            del_list = []
+            async for msg in client.get_chat_history(message.chat.id, limit=min(c*3, 1000)):
+                if msg.from_user and msg.from_user.id == uid:
+                    del_list.append(msg.id)
+                    if len(del_list) >= c: break
+            if del_list:
+                await client.delete_messages(message.chat.id, del_list)
+        except: pass
+
+async def chat_tracker_handler(client, message):
+    try:
+        uid = client.me.id
+        if getattr(message, "chat", None) and message.chat.id:
+            dq = RECENT_CHATS.setdefault(uid, [])
+            cid = message.chat.id
+            if cid in dq: dq.remove(cid)
+            dq.append(cid)
+            if len(dq) > 20: del dq[:-20]
+    except Exception: pass
+
+async def ping_controller(client, message):
+    try:
+        start = time.perf_counter()
+        m = await message.edit_text("pong...")
+        ms = int((time.perf_counter() - start) * 1000)
+        await m.edit_text(f"pong `{ms}ms`")
+    except Exception: pass
+
+async def panel_command_controller(client, message):
+    try:
+        results = await client.get_inline_bot_results(manager_bot.me.username, "panel")
+        if results and results.results:
+            await message.delete()
+            await client.send_inline_bot_result(message.chat.id, results.query_id, results.results[0].id)
+    except ChatSendInlineForbidden: await message.edit_text("🚫 اینلاین در این چت مسدود است.")
+    except Exception as e: await message.edit_text(f"❌ خطا: {e}")
+
+async def pv_media_lock_handler(client, message):
+    uid = client.me.id
+    if not message.chat or message.chat.type != ChatType.PRIVATE: return
+    if message.from_user and message.from_user.id == uid: return
+    if PV_LOCK_STATUS.get(uid, False):
+        try: await message.delete(); return
+        except: return
+
+    should_delete = False
+    
+    if getattr(message, "photo", None) and PV_PHOTO_LOCK.get(uid, False): should_delete = True
+    elif getattr(message, "video", None) and PV_VIDEO_LOCK.get(uid, False): should_delete = True
+    elif getattr(message, "animation", None) and PV_GIF_LOCK.get(uid, False): should_delete = True
+    elif getattr(message, "voice", None) and PV_VOICE_LOCK.get(uid, False): should_delete = True
+    elif getattr(message, "audio", None) and PV_MUSIC_LOCK.get(uid, False): should_delete = True
+    elif getattr(message, "sticker", None) and PV_STICKER_LOCK.get(uid, False): should_delete = True
+    elif getattr(message, "document", None) and PV_DOC_LOCK.get(uid, False): should_delete = True
+
+    if should_delete:
+        try: await message.delete()
+        except: pass
+
+async def auto_save_view_once_handler(client, message):
+    uid = client.me.id
+    if not AUTO_SAVE_VIEW_ONCE.get(uid, False) or not message.media: return
+    
+    is_view_once = getattr(message, "has_media_spoiler", False) or getattr(message, "view_once", False)
+    has_ttl = getattr(message, "ttl_seconds", None) or (message.photo and getattr(message.photo, "ttl_seconds", None)) or (message.video and getattr(message.video, "ttl_seconds", None))
+    
+    if is_view_once or has_ttl:
+        try:
+            f_path = await message.download()
+            if f_path:
+                cap = f"💾 **ذخیره خودکار مدیا**\nاز چت: {message.chat.id}\n{message.caption or ''}"
+                if getattr(message, "photo", None): await client.send_photo("me", f_path, caption=cap)
+                elif getattr(message, "video", None): await client.send_video("me", f_path, caption=cap)
+                else: await client.send_document("me", f_path, caption=cap)
+                os.remove(f_path)
+        except: pass
+
+# ============================================================
+# 🔧 تابع تولید پنل شیشه‌ای (اصلاح شده بدون خطا)
+# ============================================================
+
+def generate_panel_markup(uid):
+    def c(val): return "✅" if val else "❌"
+    preview = stylize_time("12:34", USER_FONT_CHOICES.get(uid, 'stylized'))
+    t_lang = AUTO_TRANSLATE_TARGET.get(uid)
+
+    # متغیرهای وضعیت برای جلوگیری از خطای f-string
+    clock_status = "روشن" if CLOCK_STATUS.get(uid, False) else "خاموش"
+    bold_status = "روشن" if BOLD_MODE_STATUS.get(uid, False) else "خاموش"
+    sec_status = "روشن" if SECRETARY_MODE_STATUS.get(uid, False) else "خاموش"
+    seen_status = "روشن" if AUTO_SEEN_STATUS.get(uid, False) else "خاموش"
+    typing_status = "روشن" if TYPING_MODE_STATUS.get(uid, False) else "خاموش"
+    game_status = "روشن" if PLAYING_MODE_STATUS.get(uid, False) else "خاموش"
+    autosave_status = "روشن" if AUTO_SAVE_VIEW_ONCE.get(uid, False) else "خاموش"
+    antireport_status = "روشن" if ANTI_REPORT_STATUS.get(uid, True) else "خاموش"
+    enemy_status = "روشن" if ENEMY_ACTIVE.get(uid, False) else "خاموش"
+    friend_status = "روشن" if FRIEND_ACTIVE.get(uid, False) else "خاموش"
+    crash_status = "روشن" if CRASH_ACTIVE.get(uid, False) else "خاموش"
+    pvlock_status = "روشن" if PV_LOCK_STATUS.get(uid, False) else "خاموش"
+    pvphoto_status = "روشن" if PV_PHOTO_LOCK.get(uid, False) else "خاموش"
+    pvvid_status = "روشن" if PV_VIDEO_LOCK.get(uid, False) else "خاموش"
+    pvgif_status = "روشن" if PV_GIF_LOCK.get(uid, False) else "خاموش"
+    pvvoice_status = "روشن" if PV_VOICE_LOCK.get(uid, False) else "خاموش"
+    pvmusic_status = "روشن" if PV_MUSIC_LOCK.get(uid, False) else "خاموش"
+    pvsticker_status = "روشن" if PV_STICKER_LOCK.get(uid, False) else "خاموش"
+    pvdoc_status = "روشن" if PV_DOC_LOCK.get(uid, False) else "خاموش"
+    lang_en_status = "فعال" if t_lang == 'en' else "غیرفعال"
+    lang_cn_status = "فعال" if t_lang == 'zh-CN' else "غیرفعال"
+
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(f"⏰ ساعت: {clock_status}", callback_data=f"tg_clock_{uid}"),
+            InlineKeyboardButton(f"⚡ بولد: {bold_status}", callback_data=f"tg_bold_{uid}")
+        ],
+        [InlineKeyboardButton(f"🔤 تغییر فونت: {preview}", callback_data=f"cyc_font_{uid}")],
+        [
+            InlineKeyboardButton(f"🤖 منشی: {sec_status}", callback_data=f"tg_sec_{uid}"),
+            InlineKeyboardButton(f"👁 سین: {seen_status}", callback_data=f"tg_seen_{uid}")
+        ],
+        [
+            InlineKeyboardButton(f"⌨️ تایپ: {typing_status}", callback_data=f"tg_type_{uid}"),
+            InlineKeyboardButton(f"🎮 بازی: {game_status}", callback_data=f"tg_game_{uid}")
+        ],
+        [InlineKeyboardButton(f"💾 ذخیره خودکار: {autosave_status}", callback_data=f"tg_autosv_{uid}")],
+        [InlineKeyboardButton(f"🛡 ضد ریپ: {antireport_status}", callback_data=f"tg_antireport_{uid}")],
+        [
+            InlineKeyboardButton(f"💀 دشمن: {enemy_status}", callback_data=f"tg_enm_{uid}"),
+            InlineKeyboardButton(f"🤝 دوست: {friend_status}", callback_data=f"tg_frnd_{uid}"),
+            InlineKeyboardButton(f"❤️ کراش: {crash_status}", callback_data=f"tg_crsh_{uid}")
+        ],
+        [InlineKeyboardButton(f"🔒 قفل کل پیوی: {pvlock_status}", callback_data=f"tg_pv_{uid}")],
+        [InlineKeyboardButton("🔻 قفل‌های رسانه پیوی 🔻", callback_data="none")],
+        [
+            InlineKeyboardButton(f"📷 عکس: {pvphoto_status}", callback_data=f"tg_pvph_{uid}"),
+            InlineKeyboardButton(f"🎥 ویدیو: {pvvid_status}", callback_data=f"tg_pvvi_{uid}"),
+            InlineKeyboardButton(f"🎞 گیف: {pvgif_status}", callback_data=f"tg_pvgi_{uid}")
+        ],
+        [
+            InlineKeyboardButton(f"🎤 ویس: {pvvoice_status}", callback_data=f"tg_pvvo_{uid}"),
+            InlineKeyboardButton(f"🎵 موزیک: {pvmusic_status}", callback_data=f"tg_pvmu_{uid}"),
+            InlineKeyboardButton(f"🎨 استیکر: {pvsticker_status}", callback_data=f"tg_pvst_{uid}")
+        ],
+        [InlineKeyboardButton(f"📁 فایل: {pvdoc_status}", callback_data=f"tg_pvdc_{uid}")],
+        [
+            InlineKeyboardButton(f"🇺🇸 English: {lang_en_status}", callback_data=f"lang_en_{uid}"),
+            InlineKeyboardButton(f"🇨🇳 Chinese: {lang_cn_status}", callback_data=f"lang_cn_{uid}")
+        ],
+        [InlineKeyboardButton("❌ بستن پنل", callback_data=f"close_{uid}")]
+    ])
+
+# ============================================================
+# بقیه کد (ادمین، هندلرها، و ...)
+# ============================================================
+
+def generate_admins_markup():
+    admins = data_manager.get_admins()
+    buttons = []
+    for adm in admins:
+        name = f"Admin ({adm})"
+        u_data = data_manager.data["users"].get(str(adm))
+        if u_data and u_data.get("phone"):
+            name = f"{u_data['phone']} | {adm}"
+        buttons.append([InlineKeyboardButton(name, callback_data="none"), InlineKeyboardButton("حذف ❌", callback_data=f"del_admin_{adm}")])
+    buttons.append([InlineKeyboardButton("➕ افزودن ادمین", callback_data="add_admin_prompt")])
+    buttons.append([InlineKeyboardButton("بستن ✖️", callback_data="close_admin")])
+    return InlineKeyboardMarkup(buttons)
+
+def generate_users_markup(page=0):
+    users = list(data_manager.get_all_users().values())
+    total = len(users)
+    pages = (total + 6) // 7
+    start = page * 7
+    end = start + 7
+    current_users = users[start:end]
+    
+    buttons = []
+    for u in current_users:
+        uid = u["user_id"]
+        phone = u.get("phone", "نامشخص")
+        is_active = "✅" if uid in ACTIVE_BOTS else "❌"
+        name = f"{phone} | {uid} {is_active}"
+        buttons.append([
+            InlineKeyboardButton(name, callback_data="none"), 
+            InlineKeyboardButton("سیک 🗑", callback_data=f"kick_user_{uid}")
+        ])
+        
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("⬅️ قبلی", callback_data=f"users_page_{page-1}"))
+    nav.append(InlineKeyboardButton(f"📄 {page+1}/{max(1, pages)}", callback_data="none"))
+    if page < pages - 1:
+        nav.append(InlineKeyboardButton("بعدی ➡️", callback_data=f"users_page_{page+1}"))
+        
+    if nav: buttons.append(nav)
+    buttons.append([InlineKeyboardButton("بستن ✖️", callback_data="close_admin")])
+    return InlineKeyboardMarkup(buttons)
+
+# بررسی عضویت اجباری
+async def check_forced_join(client, user_id):
+    if user_id in data_manager.get_admins():
+        return True, []
+        
+    settings = data_manager.get_global_settings()
+    channels = settings.get("forced_channels", [])
+    if not channels:
+        return True, []
+        
+    not_joined = []
+    for ch in channels:
+        try:
+            member = await client.get_chat_member(ch, user_id)
+            if member.status in [ChatMembersFilter.BANNED, ChatMembersFilter.RESTRICTED]:
+                not_joined.append(ch)
+        except UserNotParticipant:
+            not_joined.append(ch)
+        except Exception as e:
+            logging.error(f"Error checking forced join for {ch}: {e}")
+            
+    if not_joined:
+        return False, not_joined
+    return True, []
+
+def get_forced_join_markup(channels):
+    buttons = []
+    for ch in channels:
+        buttons.append([InlineKeyboardButton(f"ورود به {ch}", url=f"https://t.me/{ch.replace('@', '')}")])
+    buttons.append([InlineKeyboardButton("🔄 بررسی مجدد عضویت", callback_data="check_join_status")])
+    return InlineKeyboardMarkup(buttons)
+
+@manager_bot.on_inline_query()
+async def inline_panel_handler(client, query):
+    uid = query.from_user.id
+    if query.query == "panel":
+        result = InlineQueryResultArticle(
+            title="پنل مدیریت", 
+            input_message_content=InputTextMessageContent(f"⚡️ **مدیریت پیشرفته سلف بات**\n👤 کاربر: `{uid}`\n\nوضعیت اتصال: ✅ برقرار"),
+            reply_markup=generate_panel_markup(uid), 
+            thumb_url="https://telegra.ph/file/1e3b567786f7800e80816.jpg"
+        )
+        await query.answer([result], cache_time=0)
+
+@manager_bot.on_callback_query()
+async def callback_panel_handler(client, callback):
+    uid = callback.from_user.id
+    data_str = callback.data
+
+    # --- هندلرهای کلیدی مستقیم برای جلوگیری از ValueError ---
+    if data_str == "set_ref_target":
+        if uid not in data_manager.get_admins():
+            return await callback.answer("⛔️ دسترسی فقط برای ادمین کل مجاز است!", show_alert=True)
+        LOGIN_STATES[uid] = {"step": "awaiting_ref_target"}
+        await callback.message.edit_text("🔢 لطفاً تعداد نفرات مورد نیاز برای دعوت را وارد کنید (مثلا 2):")
+        return
+
+    if data_str == "set_ref_days":
+        if uid not in data_manager.get_admins():
+            return await callback.answer("⛔️ دسترسی فقط برای ادمین کل مجاز است!", show_alert=True)
+        LOGIN_STATES[uid] = {"step": "awaiting_ref_days"}
+        await callback.message.edit_text("⏳ لطفاً تعداد روزهایی که در ازای دعوت هدیه داده میشود را وارد کنید (مثلا 5):")
+        return
+
+    if data_str == "add_forced_channel":
+        if uid not in data_manager.get_admins():
+            return await callback.answer("⛔️ دسترسی فقط برای ادمین کل مجاز است!", show_alert=True)
+        LOGIN_STATES[uid] = {"step": "awaiting_forced_channel"}
+        await callback.message.edit_text("📢 لطفاً یوزرنیم کانال یا گروه را با @ بفرستید:\n⚠️ توجه: حتما ربات باید در آنجا ادمین باشد تا بتواند اعضا را بررسی کند.")
+        return
+
+    if data_str == "check_join_status":
+        is_joined, channels = await check_forced_join(client, uid)
+        if is_joined:
+            try: await callback.message.delete()
+            except: pass
+            await client.send_message(uid, "✅ عضویت شما تایید شد. مجدداً ربات را /start کنید.")
+        else:
+            await callback.answer("❌ هنوز در همه کانال‌ها عضو نشده‌اید!", show_alert=True)
+        return
+
+    if data_str == "get_ref_license_now":
+        user_data = data_manager.get_user_data(uid)
+        settings = data_manager.get_global_settings()
+        target = settings.get("ref_target", 0)
+        days = settings.get("ref_days", 0)
+        
+        if len(user_data.get("referrals", [])) >= target and target > 0:
+            duration = days * 86400
+            data_manager.apply_license_directly(uid, duration, "day")
+            data_manager.clear_referrals(uid)
+            await callback.message.edit_text(f"🎉 تبریک! لایسنس {days} روزه شما با موفقیت فعال شد.\nاکنون می‌توانید از دکمه '🔑 فعال‌سازی سلف' استفاده کنید.")
+        else:
+            await callback.answer("تعداد دعوت‌های شما هنوز به حد نصاب نرسیده است!", show_alert=True)
+        return
+
+    # پردازش دکمه‌های داینامیک و چند بخشی
+    data = data_str.split("_")
+    if data[0] == "none":
+        return await callback.answer()
+
+    if data[0] == "remove" and data[1] == "channel":
+        if uid not in data_manager.get_admins(): return
+        ch_to_remove = data_str.replace("remove_channel_", "")
+        settings = data_manager.get_global_settings()
+        chs = settings.get("forced_channels", [])
+        if ch_to_remove in chs:
+            chs.remove(ch_to_remove)
+            data_manager.update_global_settings("forced_channels", chs)
+            await callback.answer(f"کانال {ch_to_remove} حذف شد.", show_alert=True)
+            try: await callback.message.edit_text("✅ کانال با موفقیت حذف شد.")
+            except: pass
+        return
+
+    if data[0] == "add" and data[1] == "admin":
+        LOGIN_STATES[uid] = {"step": "awaiting_admin_id"}
+        await callback.message.edit_text("لطفاً آیدی عددی ادمین جدید را وارد کنید:")
+        return
+        
+    if data[0] == "del" and data[1] == "admin":
+        adm_id = int(data[2])
+        if adm_id == ROOT_ADMIN:
+            return await callback.answer("شما نمی‌توانید ادمین اصلی را حذف کنید!", show_alert=True)
+        if data_manager.remove_admin(adm_id):
+            await callback.answer(f"ادمین {adm_id} حذف شد.", show_alert=True)
+            if not data_manager.check_subscription(adm_id):
+                await stop_user_bot(adm_id)
+            try: await callback.message.edit_reply_markup(reply_markup=generate_admins_markup())
+            except: pass
+        return
+        
+    if data[0] == "users" and data[1] == "page":
+        page = int(data[2])
+        try: await callback.message.edit_reply_markup(reply_markup=generate_users_markup(page))
+        except: pass
+        return
+        
+    if data[0] == "kick" and data[1] == "user":
+        target_uid = int(data[2])
+        await stop_user_bot(target_uid)
+        data_manager.delete_user_full(target_uid)
+        await callback.answer("کاربر کاملاً از سیستم حذف شد (سیک شد)!", show_alert=True)
+        try: await callback.message.edit_reply_markup(reply_markup=generate_users_markup(0))
+        except: pass
+        return
+        
+    if data[0] == "close" and len(data) == 2 and data[1] == "admin":
+        await callback.message.delete()
+        return
+
+    if data[0] == "create" and data[1] == "lic":
+        LOGIN_STATES[uid] = {"step": "awaiting_duration", "unit": data[2]}
+        await callback.message.edit_text("🔢 لطفاً زمان را به عدد وارد کنید:")
+        return
+
+    # پردازش اکشن‌های پنل کاربری سلف بات (ایمن شده با بلوک try-except)
+    try:
+        action, target_user_id = "_".join(data[:-1]), int(data[-1])
+    except ValueError:
+        # ساختار دکمه با آیدی کاربر همخوانی ندارد؛ با موفقیت نادیده گرفته می‌شود.
+        return
+
+    if uid != target_user_id:
+        return await callback.answer("⛔️ دسترسی غیرمجاز!", show_alert=True)
+
+    s_up = {}
+    if action == "tg_clock":
+        s_up["clock"] = CLOCK_STATUS[target_user_id] = not CLOCK_STATUS.get(target_user_id, False)
+        s_up["clock_manual"] = True
+        client_bot = ACTIVE_BOTS.get(target_user_id, [None])[0]
+        if s_up["clock"]:
+            if client_bot: asyncio.create_task(perform_clock_update_now(client_bot, target_user_id))
+        else:
+            if client_bot:
+                try:
+                    me = await client_bot.get_me()
+                    clean = re.sub(r'(?:\s*' + CLOCK_CHARS_REGEX_CLASS + r'+)+$', '', me.first_name or "").strip()
+                    if clean != me.first_name: await client_bot.update_profile(first_name=clean)
+                except: pass
+
+    elif action == "cyc_font":
+        cur = USER_FONT_CHOICES.get(target_user_id, 'stylized')
+        new_f = FONT_KEYS_ORDER[(FONT_KEYS_ORDER.index(cur) + 1) % len(FONT_KEYS_ORDER)]
+        s_up["font"] = USER_FONT_CHOICES[target_user_id] = new_f
+        if CLOCK_STATUS.get(target_user_id, False) and target_user_id in ACTIVE_BOTS:
+            asyncio.create_task(perform_clock_update_now(ACTIVE_BOTS[target_user_id][0], target_user_id))
+    
+    elif action == "tg_bold": s_up["bold"] = BOLD_MODE_STATUS[target_user_id] = not BOLD_MODE_STATUS.get(target_user_id, False)
+    
+    elif action == "tg_sec":
+        s_up["secretary"] = SECRETARY_MODE_STATUS[target_user_id] = not SECRETARY_MODE_STATUS.get(target_user_id, False)
+        if s_up["secretary"]:
+            USERS_REPLIED_IN_SECRETARY[target_user_id] = set()
+            try:
+                for k in list(SECRETARY_LAST_REPLY.keys()):
+                    if isinstance(k, tuple) and k and k[0] == target_user_id:
+                        SECRETARY_LAST_REPLY.pop(k, None)
+            except Exception: pass
+            data_manager.update_user_data(target_user_id, {"replied_users": []})
+            
+    elif action == "tg_antireport": s_up["anti_report"] = ANTI_REPORT_STATUS[target_user_id] = not ANTI_REPORT_STATUS.get(target_user_id, True)
+    elif action == "tg_seen": s_up["auto_seen"] = AUTO_SEEN_STATUS[target_user_id] = not AUTO_SEEN_STATUS.get(target_user_id, False)
+    elif action == "tg_type": s_up["typing"] = TYPING_MODE_STATUS[target_user_id] = not TYPING_MODE_STATUS.get(target_user_id, False)
+    elif action == "tg_game": s_up["playing"] = PLAYING_MODE_STATUS[target_user_id] = not PLAYING_MODE_STATUS.get(target_user_id, False)
+    
+    elif action == "tg_autosv": s_up["auto_save"] = AUTO_SAVE_VIEW_ONCE[target_user_id] = not AUTO_SAVE_VIEW_ONCE.get(target_user_id, False)
+    
+    elif action == "tg_enm": s_up["enemy_active"] = ENEMY_ACTIVE[target_user_id] = not ENEMY_ACTIVE.get(target_user_id, False)
+    elif action == "tg_frnd": s_up["friend_active"] = FRIEND_ACTIVE[target_user_id] = not FRIEND_ACTIVE.get(target_user_id, False)
+    elif action == "tg_crsh": s_up["crash_active"] = CRASH_ACTIVE[target_user_id] = not CRASH_ACTIVE.get(target_user_id, False)
+    
+    elif action == "tg_pv": s_up["pv_lock"] = PV_LOCK_STATUS[target_user_id] = not PV_LOCK_STATUS.get(target_user_id, False)
+    elif action == "tg_pvph": s_up["pv_photo"] = PV_PHOTO_LOCK[target_user_id] = not PV_PHOTO_LOCK.get(target_user_id, False)
+    elif action == "tg_pvvi": s_up["pv_video"] = PV_VIDEO_LOCK[target_user_id] = not PV_VIDEO_LOCK.get(target_user_id, False)
+    elif action == "tg_pvgi": s_up["pv_gif"] = PV_GIF_LOCK[target_user_id] = not PV_GIF_LOCK.get(target_user_id, False)
+    elif action == "tg_pvvo": s_up["pv_voice"] = PV_VOICE_LOCK[target_user_id] = not PV_VOICE_LOCK.get(target_user_id, False)
+    elif action == "tg_pvmu": s_up["pv_music"] = PV_MUSIC_LOCK[target_user_id] = not PV_MUSIC_LOCK.get(target_user_id, False)
+    elif action == "tg_pvst": s_up["pv_sticker"] = PV_STICKER_LOCK[target_user_id] = not PV_STICKER_LOCK.get(target_user_id, False)
+    elif action == "tg_pvdc": s_up["pv_doc"] = PV_DOC_LOCK[target_user_id] = not PV_DOC_LOCK.get(target_user_id, False)
+    
+    elif action.startswith("lang_"):
+        l_code = action.split("_")[1]
+        t_lang_map = {"en": "en", "ru": "ru", "cn": "zh-CN"}
+        t_target = t_lang_map.get(l_code)
+        if AUTO_TRANSLATE_TARGET.get(target_user_id) == t_target:
+            s_up["translate"] = AUTO_TRANSLATE_TARGET[target_user_id] = None
+        else:
+            s_up["translate"] = AUTO_TRANSLATE_TARGET[target_user_id] = t_target
+
+    elif action == "close":
+        try:
+            if callback.inline_message_id: await client.edit_inline_text(callback.inline_message_id, "✅ پنل بسته شد.")
+            else: await callback.message.delete()
+        except: pass
+        try: await callback.answer()
+        except: pass
+        return
+
+    if s_up: data_manager.update_user_data(target_user_id, {"settings": s_up})
+    
+    try: 
+        if callback.inline_message_id:
+            await client.edit_inline_reply_markup(callback.inline_message_id, reply_markup=generate_panel_markup(target_user_id))
+        else:
+            await callback.edit_message_reply_markup(reply_markup=generate_panel_markup(target_user_id))
+    except: pass
+    
+    try: await callback.answer()
+    except: pass
+
+@manager_bot.on_message(filters.command("start") | filters.regex("🔑 فعال‌سازی سلف"))
+async def start_handler(client, message):
+    uid = message.from_user.id
+    
+    # بررسی زیرمجموعه گیری در دستور استارت
+    if message.text and message.text.startswith("/start "):
+        parts = message.text.split()
+        if len(parts) > 1 and parts[1].startswith("ref_"):
+            try:
+                referrer_id = int(parts[1].split("_")[1])
+                if referrer_id != uid:
+                    data_manager.add_referral(referrer_id, uid)
+            except: pass
+
+    # بررسی عضویت اجباری
+    is_joined, req_channels = await check_forced_join(client, uid)
+    if not is_joined:
+        return await message.reply_text(
+            "⚠️ **برای استفاده از ربات، ابتدا باید در کانال‌های زیر عضو شوید:**",
+            reply_markup=get_forced_join_markup(req_channels)
+        )
+
+    if uid in data_manager.get_admins() and (message.text == "/start" or not message.text):
+        kb = ReplyKeyboardMarkup([
+            [KeyboardButton("🔑 فعال‌سازی سلف"), KeyboardButton("📝 ساخت اشتراک")],
+            [KeyboardButton("👑 مدیریت ادمین‌ها"), KeyboardButton("👥 مدیریت کاربران")],
+            [KeyboardButton("📢 پیام همگانی"), KeyboardButton("⏳ وضعیت")],
+            [KeyboardButton("🎁 تنظیمات سلف رایگان"), KeyboardButton("📢 عضویت اجباری")]
+        ], resize_keyboard=True)
+        return await message.reply_text("👋 ادمین عزیز، به پنل مدیریت کل خوش آمدید.", reply_markup=kb)
+    
+    if not data_manager.check_subscription(uid):
+        LOGIN_STATES[uid] = {'step': 'awaiting_license'}
+        kb = ReplyKeyboardMarkup([
+            [KeyboardButton("🔑 فعال‌سازی سلف"), KeyboardButton("🎁 سلف رایگان")],
+            [KeyboardButton("⏳ وضعیت")]
+        ], resize_keyboard=True)
+        return await message.reply_text("⛔️ شما اشتراک فعال ندارید. کد لایسنس خود را ارسال کنید یا از بخش 'سلف رایگان' اقدام کنید:", reply_markup=kb)
+
+    if message.text and message.text.startswith("/start"):
+        kb = ReplyKeyboardMarkup([
+            [KeyboardButton("🔑 فعال‌سازی سلف"), KeyboardButton("🎁 سلف رایگان")],
+            [KeyboardButton("⏳ وضعیت")]
+        ], resize_keyboard=True)
+        await message.reply_text("👋 اشتراک شما فعال است.", reply_markup=kb)
+    else:
+        await message.reply_text("🚀 اتصال به اکانت تلگرام:", reply_markup=ReplyKeyboardMarkup([[KeyboardButton("📱 ارسال شماره", request_contact=True)]], resize_keyboard=True, one_time_keyboard=True))
+
+@manager_bot.on_message(filters.regex("📝 ساخت اشتراک"))
+async def admin_create_license(client, message):
+    if message.from_user.id not in data_manager.get_admins(): return
+    await message.reply_text("⏳ نوع زمان:", reply_markup=InlineKeyboardMarkup([
+        [InlineKeyboardButton("دقیقه", callback_data=f"create_lic_min_{message.from_user.id}"),
+         InlineKeyboardButton("ساعت", callback_data=f"create_lic_hour_{message.from_user.id}"),
+         InlineKeyboardButton("روز", callback_data=f"create_lic_day_{message.from_user.id}")]
+    ]))
+
+@manager_bot.on_message(filters.regex("👑 مدیریت ادمین‌ها"))
+async def admin_management(client, message):
+    if message.from_user.id not in data_manager.get_admins(): return
+    await message.reply_text("👑 مدیریت ادمین‌های ربات:", reply_markup=generate_admins_markup())
+
+@manager_bot.on_message(filters.regex("👥 مدیریت کاربران"))
+async def user_management(client, message):
+    if message.from_user.id not in data_manager.get_admins(): return
+    total = len(data_manager.get_all_users())
+    await message.reply_text(f"👥 تعداد کل کاربران متصل: {total}\n\nبرای حذف (سیک) از دکمه‌های زیر استفاده کنید:", reply_markup=generate_users_markup(0))
+
+@manager_bot.on_message(filters.regex("📢 پیام همگانی"))
+async def broadcast_msg(client, message):
+    if message.from_user.id not in data_manager.get_admins(): return
+    LOGIN_STATES[message.from_user.id] = {"step": "awaiting_broadcast"}
+    await message.reply_text("لطفاً متنی که می‌خواهید برای تمام کاربران ربات ارسال شود را بفرستید:")
+
+@manager_bot.on_message(filters.regex("🎁 تنظیمات سلف رایگان"))
+async def admin_free_self_settings(client, message):
+    if message.from_user.id not in data_manager.get_admins(): return
+    settings = data_manager.get_global_settings()
+    text = (
+        "🎁 **تنظیمات سلف رایگان (زیرمجموعه‌گیری)**\n\n"
+        f"🎯 تعداد دعوت مورد نیاز: `{settings.get('ref_target', 0)} نفر`\n"
+        f"⏳ مدت زمان هدیه: `{settings.get('ref_days', 0)} روز`\n\n"
+        "برای تغییر مقادیر دکمه‌های زیر را بزنید:"
+    )
+    
+    markup = InlineKeyboardMarkup([
+        [InlineKeyboardButton("تغییر تعداد دعوت", callback_data="set_ref_target"),
+         InlineKeyboardButton("تغییر روز هدیه", callback_data="set_ref_days")]
+    ])
+    await message.reply_text(text, reply_markup=markup)
+
+@manager_bot.on_message(filters.regex("📢 عضویت اجباری"))
+async def admin_forced_join(client, message):
+    if message.from_user.id not in data_manager.get_admins(): return
+    settings = data_manager.get_global_settings()
+    channels = settings.get("forced_channels", [])
+    
+    if not channels:
+        text = "📢 در حال حاضر هیچ کانالی برای عضویت اجباری تنظیم نشده است."
+    else:
+        text = "📢 **لیست کانال‌های عضویت اجباری:**\n(برای حذف روی دکمه زیر هرکدام کلیک کنید)"
+        
+    markup = []
+    for ch in channels:
+        markup.append([InlineKeyboardButton(f"حذف {ch}", callback_data=f"remove_channel_{ch}")])
+        
+    markup.append([InlineKeyboardButton("➕ افزودن کانال/گروه", callback_data="add_forced_channel")])
+    
+    await message.reply_text(text, reply_markup=InlineKeyboardMarkup(markup))
+
+@manager_bot.on_message(filters.regex("🎁 سلف رایگان"))
+async def user_free_self(client, message):
+    uid = message.from_user.id
+    is_joined, req_channels = await check_forced_join(client, uid)
+    if not is_joined: return
+    
+    bot_me = await client.get_me()
+    bot_username = bot_me.username
+    
+    settings = data_manager.get_global_settings()
+    target = settings.get('ref_target', 0)
+    days = settings.get('ref_days', 0)
+    
+    if target <= 0:
+        return await message.reply_text("❌ سیستم سلف رایگان در حال حاضر غیرفعال است.")
+        
+    user_data = data_manager.get_user_data(uid)
+    ref_count = len(user_data.get("referrals", []))
+    
+    link = f"https://t.me/{bot_username}?start=ref_{uid}"
+    
+    text = (
+        "🎁 **دریافت سلف رایگان**\n\n"
+        f"شما با دعوت از دوستان خود از طریق لینک زیر میتوانید `{days} روز` اشتراک رایگان دریافت کنید!\n\n"
+        f"🔗 لینک اختصاصی شما:\n`{link}`\n\n"
+        f"👥 تعداد دعوت شده توسط شما: `{ref_count} از {target}`\n"
+    )
+    
+    markup = None
+    if ref_count >= target:
+        markup = InlineKeyboardMarkup([[InlineKeyboardButton("🎉 دریافت لایسنس", callback_data="get_ref_license_now")]])
+        
+    await message.reply_text(text, reply_markup=markup)
+
+@manager_bot.on_message(filters.regex("⏳ وضعیت"))
+async def status_handler(client, message):
+    uid = message.from_user.id
+    
+    is_joined, _ = await check_forced_join(client, uid)
+    if not is_joined: return
+
+    is_admin = uid in data_manager.get_admins()
+    
+    if is_admin:
+        total_users = len(data_manager.get_all_users())
+        active_bots = len(ACTIVE_BOTS)
+        total_subs = len(data_manager.data.get("subscriptions", {}))
+        
+        text = (
+            "📊 **وضعیت سرور و ربات**\n\n"
+            f"👥 کل کاربران دیتابیس: `{total_users}`\n"
+            f"🟢 سلف‌های روشن (آنلاین): `{active_bots}`\n"
+            f"🎟 اشتراک‌های فعال: `{total_subs}`\n"
+            f"👑 تعداد ادمین‌ها: `{len(data_manager.get_admins())}`\n"
+        )
+        await message.reply_text(text)
+    else:
+        if not data_manager.check_subscription(uid):
+            return await message.reply_text("❌ شما اشتراک فعالی ندارید.")
+        
+        sub = data_manager.data.get("subscriptions", {}).get(str(uid))
+        is_active = "✅ روشن و متصل" if uid in ACTIVE_BOTS else "❌ خاموش"
+        
+        text = (
+            "📊 **وضعیت اکانت شما**\n\n"
+            f"🤖 وضعیت اتصال سلف: {is_active}\n"
+        )
+        if sub:
+            exp_date = datetime.fromtimestamp(sub["expiry_time"], TEHRAN_TIMEZONE).strftime('%Y-%m-%d %H:%M:%S')
+            text += f"⏳ تاریخ انقضا اشتراک: `{exp_date}`\n"
+        
+        await message.reply_text(text)
+
+@manager_bot.on_message(filters.contact)
+async def contact_handler(client, message):
+    uid = message.chat.id
+    if not data_manager.check_subscription(uid): return
+    phone = message.contact.phone_number
+    await message.reply_text("⏳ در حال اتصال...", reply_markup=ReplyKeyboardRemove())
+    
+    user_c = Client(f"login_{uid}", api_id=API_ID, api_hash=API_HASH, in_memory=True, no_updates=True)
+    await user_c.connect()
+    try:
+        sent = await user_c.send_code(phone)
+        LOGIN_STATES[uid] = {'step': 'code', 'phone': phone, 'client': user_c, 'hash': sent.phone_code_hash}
+        await message.reply_text("✅ کد ارسالی را با فاصله وارد کنید (مثال: 1 2 3 4 5)")
+    except Exception as e:
+        await user_c.disconnect()
+        await message.reply_text(f"❌ خطا: {e}")
+
+@manager_bot.on_message(filters.text & filters.private & filters.create(lambda _, __, m: m.chat.id in LOGIN_STATES))
+async def text_handler(client, message):
+    uid = message.chat.id
+    st = LOGIN_STATES[uid]
+    
+    if st['step'] == 'awaiting_broadcast':
+        text_to_send = message.text
+        del LOGIN_STATES[uid]
+        await message.reply_text("⏳ در حال ارسال پیام همگانی...")
+        count = 0
+        for user_id in list(data_manager.get_all_users().keys()):
+            try:
+                await client.send_message(int(user_id), f"📢 پیام از مدیریت:\n\n{text_to_send}")
+                count += 1
+            except: pass
+            await asyncio.sleep(0.1)
+        await message.reply_text(f"✅ پیام برای {count} نفر با موفقیت ارسال شد.")
+        return
+
+    if st['step'] == 'awaiting_admin_id':
+        if message.text.isdigit():
+            if data_manager.add_admin(int(message.text)):
+                await message.reply_text(f"✅ کاربر {message.text} به لیست ادمین‌ها اضافه شد.")
+            else:
+                await message.reply_text("ℹ️ این کاربر از قبل ادمین بود.")
+        else:
+            await message.reply_text("❌ آیدی باید عدد باشد.")
+        del LOGIN_STATES[uid]
+        return
+        
+    if st['step'] == 'awaiting_ref_target':
+        if message.text.isdigit():
+            data_manager.update_global_settings("ref_target", int(message.text))
+            await message.reply_text("✅ تعداد هدف دعوت بروزرسانی شد.")
+        else: await message.reply_text("❌ عدد وارد کنید.")
+        del LOGIN_STATES[uid]
+        return
+        
+    if st['step'] == 'awaiting_ref_days':
+        if message.text.isdigit():
+            data_manager.update_global_settings("ref_days", int(message.text))
+            await message.reply_text("✅ تعداد روزهای هدیه بروزرسانی شد.")
+        else: await message.reply_text("❌ عدد وارد کنید.")
+        del LOGIN_STATES[uid]
+        return
+        
+    if st['step'] == 'awaiting_forced_channel':
+        ch = message.text.strip()
+        if not ch.startswith("@"):
+            await message.reply_text("❌ یوزرنیم باید با @ شروع شود.")
+        else:
+            chs = data_manager.get_global_settings().get("forced_channels", [])
+            if ch not in chs:
+                chs.append(ch)
+                data_manager.update_global_settings("forced_channels", chs)
+                await message.reply_text(f"✅ کانال {ch} به لیست عضویت اجباری اضافه شد.")
+            else:
+                await message.reply_text("ℹ️ این کانال از قبل وجود داشت.")
+        del LOGIN_STATES[uid]
+        return
+
+    if st['step'] == 'awaiting_license':
+        ok, msg = data_manager.use_license(uid, message.text.strip().upper())
+        if ok:
+            del LOGIN_STATES[uid]
+            await message.reply_text(msg, reply_markup=ReplyKeyboardMarkup([
+                [KeyboardButton("🔑 فعال‌سازی سلف"), KeyboardButton("🎁 سلف رایگان")],
+                [KeyboardButton("⏳ وضعیت")]
+            ], resize_keyboard=True))
+        else: await message.reply_text(msg)
+        return
+
+    if st['step'] == 'awaiting_duration':
+        if not message.text.isdigit(): return await message.reply_text("عدد بفرستید!")
+        unit, am = st['unit'], int(message.text)
+        sec = am * {"min": 60, "hour": 3600, "day": 86400}[unit]
+        code = data_manager.create_license(sec, unit)
+        await message.reply_text(f"✅ کد ساخته شد:\n`{code}`")
+        del LOGIN_STATES[uid]
+        return
+
+    user_c = st.get('client')
+    if not user_c: return
+
+    if st['step'] == 'code':
+        try:
+            await user_c.sign_in(st['phone'], st['hash'], re.sub(r"\D+", "", message.text))
+            await finalize_login(message, user_c, st['phone'])
+        except SessionPasswordNeeded:
+            st['step'] = 'password'
+            await message.reply_text("🔐 رمز دو مرحله‌ای را وارد کنید:")
+        except Exception as e: await message.reply_text(f"❌ {e}")
+    
+    elif st['step'] == 'password':
+        try:
+            await user_c.check_password(message.text)
+            await finalize_login(message, user_c, st['phone'])
+        except Exception as e: await message.reply_text(f"❌ {e}")
+
+async def finalize_login(message, user_c, phone):
+    s_str = await user_c.export_session_string()
+    uid = (await user_c.get_me()).id
+    await user_c.disconnect()
+    data_manager.save_session(phone, s_str, uid)
+    asyncio.create_task(start_bot_instance(s_str, phone, uid, 'stylized'))
+    del LOGIN_STATES[message.chat.id]
+    await message.reply_text("✅ اکانت فعال شد! دستور `پنل` را در اکانت اصلی خود بزنید.")
+
+async def help_cmd_handler(client, message):
+    try: await message.edit_text(HELP_TEXT)
+    except: pass
+
+async def start_bot_instance(session_string: str, phone: str, user_id: int, font_style: str = 'stylized'):
+    if user_id in STARTING_BOTS:
+        return
+    STARTING_BOTS.add(user_id)
+    try:
+        now = time.time()
+        last = SESSION_START_THROTTLE.get(user_id, 0)
+        if last and now - last < 20:
+            return
+        SESSION_START_THROTTLE[user_id] = now
+        await asyncio.sleep(random.uniform(0.2, 1.2))
+        client = ResilientClient(
+            f"bot_{user_id}", api_id=API_ID, api_hash=API_HASH,
+            session_string=session_string, in_memory=True, no_updates=False
+        )
+        try:
+            await asyncio.wait_for(client.start(), timeout=15)
+        except (AuthKeyUnregistered, UserDeactivated, UserDeactivatedBan, PeerIdInvalid):
+            data_manager.delete_session(phone)
+            return
+        except Exception as e:
+            logging.warning(f"Startup failed for {user_id}: {e}")
+            return
+
+        if user_id in ACTIVE_BOTS:
+            old_client, old_tasks = ACTIVE_BOTS.pop(user_id)
+            for t in old_tasks:
+                try: t.cancel()
+                except Exception: pass
+            try: await old_client.stop()
+            except Exception: pass
+
+        client.add_handler(MessageHandler(chat_tracker_handler, filters.all), group=-100)
+        client.add_handler(MessageHandler(god_mode_handler, filters.incoming & ~filters.me), group=-10)
+        client.add_handler(MessageHandler(pv_media_lock_handler, filters.private & ~filters.me), group=-6)
+        client.add_handler(MessageHandler(auto_seen_handler, filters.private & ~filters.me), group=-4)
+        client.add_handler(MessageHandler(incoming_message_manager, filters.all & ~filters.me), group=-3)
+        client.add_handler(MessageHandler(auto_save_view_once_handler, filters.private & ~filters.me), group=-2)
+        client.add_handler(MessageHandler(outgoing_message_modifier, filters.text & filters.me & ~filters.reply), group=-1)
+
+        cmd_filter = filters.me & filters.text
+        client.add_handler(MessageHandler(help_cmd_handler, cmd_filter & filters.regex("^راهنما$")), group=0)
+        client.add_handler(MessageHandler(ping_controller, cmd_filter & filters.regex(r"^(ping|پینگ)$", re.I)), group=0)
+        client.add_handler(MessageHandler(panel_command_controller, cmd_filter & filters.regex(r"^(پنل|panel)$")), group=0)
+        client.add_handler(MessageHandler(set_secretary_message_controller, cmd_filter & filters.regex(r"^تنظیم متن منشی")), group=0)
+        client.add_handler(MessageHandler(fun_controller, cmd_filter & filters.regex(r"^(fun|فان|heart|قلب|typing|تایپ|progress|پروگرس|wave|موج|pulse|ضربان|emptyheart|قلب خالی)", re.I)), group=0)
+        client.add_handler(MessageHandler(list_management_controller, cmd_filter & filters.regex(r"^(تنظیم|حذف|لیست|پاکسازی لیست)(?:\sمتن)?\s(دشمن|دوست|کراش)", re.I)), group=0)
+        client.add_handler(MessageHandler(reply_based_controller, cmd_filter & filters.regex(r"^(دانلود|بن|پین|حذف|ذخیره|تکرار|بلاک|سکوت|ریاکشن)")), group=0)
+        client.add_handler(MessageHandler(tools_controller, cmd_filter & filters.regex(r"^(تگ|tagall|تگ ادمین ها|آن پین|اسپم|فلود|حذف)")), group=0)
+
+        client.add_handler(MessageHandler(secretary_auto_reply_handler, filters.private & ~filters.me & ~filters.bot & ~filters.service), group=1)
+        client.add_handler(MessageHandler(target_reply_handler, filters.incoming & ~filters.me & ~filters.bot & ~filters.service), group=2)
+
+        tasks = [
+            asyncio.create_task(update_profile_clock(client, user_id)),
+            asyncio.create_task(anti_login_task(client, user_id)),
+            asyncio.create_task(status_action_task(client, user_id))
+        ]
+        ACTIVE_BOTS[user_id] = (client, tasks)
+        logging.info(f"Bot instance started for {user_id}")
+    finally:
+        STARTING_BOTS.discard(user_id)
+
+async def memory_cleaner():
+    while True:
+        try:
+            await asyncio.sleep(180)
+            for uid, (client, tasks) in list(ACTIVE_BOTS.items()):
+                ACTIVE_BOTS[uid] = (client, [t for t in tasks if not t.done()])
+            gc.collect()
+        except asyncio.CancelledError:
+            break
+        except Exception:
+            await asyncio.sleep(60)
+
+async def main():
+    sem = asyncio.Semaphore(STARTUP_CONCURRENCY)
+    sessions = list(data_manager.get_all_sessions())
+
+    async def start_one(phone, s_data):
+        async with sem:
+            try:
+                uid = int(s_data["user_id"])
+                if data_manager.check_subscription(uid):
+                    await start_bot_instance(s_data["string"], phone, uid, 'stylized')
+                else:
+                    data_manager.delete_user_full(uid)
+            except Exception as e:
+                logging.warning(f"Startup error for {phone}: {e}")
+
+    try:
+        await manager_bot.start()
+    except Exception as e:
+        logging.error(f"Manager bot start failed: {e}")
+        return
+
+    asyncio.create_task(data_manager.auto_save_loop())
+    asyncio.create_task(subscription_monitor_task())
+    asyncio.create_task(memory_cleaner())
+
+    for phone, s_data in sessions:
+        asyncio.create_task(start_one(phone, s_data))
+        await asyncio.sleep(0.05)
+    logging.info("Manager bot started; sessions are loading in background.")
+
+    try:
+        await idle()
+    finally:
+        try: data_manager.force_save_sync()
+        except Exception: pass
+        try:
+            if HTTP_SESSION and not HTTP_SESSION.closed:
+                await HTTP_SESSION.close()
+        except Exception: pass
+        for uid in list(ACTIVE_BOTS.keys()):
+            try: await stop_user_bot(uid)
+            except Exception: pass
+        try: await manager_bot.stop()
+        except Exception: pass
 
 if __name__ == "__main__":
-    run_bot()
+    try:
+        asyncio.get_event_loop().run_until_complete(main())
+    except KeyboardInterrupt:
+        pass
