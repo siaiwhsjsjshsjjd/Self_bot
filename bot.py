@@ -42,7 +42,7 @@ DB_PATH = os.path.join(DATA_DIR, "vip_bet.db")
 
 DIAMOND_RATE = 40
 REF_BONUS = 40
-BOT_USERNAME = "self_made_iran_bot"
+BOT_USERNAME = "Tt_selfbot"
 ACTIVATE_COST = 20
 HOURLY_COST = 2
 # ساعت نام سلف؛ 210 دقیقه یعنی UTC+03:30 (قابل تغییر برای ساعت محل شما)
