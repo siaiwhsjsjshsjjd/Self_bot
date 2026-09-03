@@ -4,7 +4,6 @@ import json
 import time
 
 TOKEN = "8200221816:AAHN5J-iFXJoQ9mEFLcRBc3ZVDCv2cmrsxQ"
-
 CUSTOM_EMOJI_ID = "5931415565955503486"
 
 API = f"https://api.telegram.org/bot{TOKEN}/"
@@ -21,87 +20,75 @@ def telegram(method, data=None):
         return json.loads(response.read().decode("utf-8"))
 
 
-# -------------------------
-# 1. بررسی اتصال به ربات
-# -------------------------
+# =========================
+# بررسی ربات
+# =========================
 
-try:
-    me = telegram("getMe")
+me = telegram("getMe")
 
-    if not me.get("ok"):
-        print("❌ توکن ربات مشکل دارد:")
-        print(me)
-        raise SystemExit
-
-    print("✅ ربات متصل است:")
-    print("@", me["result"].get("username"))
-
-except Exception as e:
-    print("❌ خطا در اتصال به Telegram:", e)
+if not me.get("ok"):
+    print("❌ توکن ربات اشتباه است")
+    print(me)
     raise SystemExit
 
-
-# -------------------------
-# 2. بررسی Custom Emoji
-# -------------------------
-
-try:
-    emoji_result = telegram(
-        "getCustomEmojiStickers",
-        {
-            "custom_emoji_ids": json.dumps([CUSTOM_EMOJI_ID])
-        }
-    )
-
-    if not emoji_result.get("ok"):
-        print("❌ Telegram این Custom Emoji را قبول نکرد:")
-        print(emoji_result)
-        raise SystemExit
-
-    stickers = emoji_result.get("result", [])
-
-    if not stickers:
-        print("❌ این Custom Emoji پیدا نشد:")
-        print(CUSTOM_EMOJI_ID)
-        raise SystemExit
-
-    emoji = stickers[0]
-
-    print("✅ Custom Emoji سالم است")
-    print("ID:", emoji.get("custom_emoji_id"))
-    print("Type:", emoji.get("type"))
-    print("Animated:", emoji.get("is_animated"))
-    print("Video:", emoji.get("is_video"))
+print("✅ ربات متصل شد")
+print("Username:", me["result"].get("username"))
 
 
-except Exception as e:
-    print("❌ خطا در بررسی Custom Emoji:", e)
+# =========================
+# گرفتن اطلاعات Custom Emoji
+# =========================
+
+emoji_info = telegram(
+    "getCustomEmojiStickers",
+    {
+        "custom_emoji_ids": json.dumps([CUSTOM_EMOJI_ID])
+    }
+)
+
+if not emoji_info.get("ok"):
+    print("❌ خطا در بررسی Custom Emoji")
+    print(emoji_info)
     raise SystemExit
 
+stickers = emoji_info.get("result", [])
 
-# -------------------------
-# 3. حذف Webhook
-# -------------------------
+if not stickers:
+    print("❌ Custom Emoji پیدا نشد")
+    raise SystemExit
+
+sticker = stickers[0]
+
+REAL_EMOJI = sticker.get("emoji")
+
+print("✅ Custom Emoji پیدا شد")
+print("ID:", sticker.get("custom_emoji_id"))
+print("Emoji جایگزین:", REAL_EMOJI)
+print("Animated:", sticker.get("is_animated"))
+print("Video:", sticker.get("is_video"))
+
+
+# =========================
+# حذف Webhook
+# =========================
 
 try:
-    result = telegram(
-        "deleteWebhook",
-        {
-            "drop_pending_updates": "true"
-        }
+    print(
+        "Webhook:",
+        telegram(
+            "deleteWebhook",
+            {"drop_pending_updates": "true"}
+        )
     )
-
-    print("Webhook:", result)
-
 except Exception as e:
-    print("❌ خطا در حذف Webhook:", e)
+    print("Webhook error:", e)
 
 
-# -------------------------
-# 4. شروع ربات
-# -------------------------
+# =========================
+# شروع ربات
+# =========================
 
-print("✅ ربات آماده است.")
+print("✅ ربات آماده است")
 print("منتظر /start ...")
 
 offset = 0
@@ -137,19 +124,23 @@ while True:
 
             chat_id = message["chat"]["id"]
 
-            # یک کاراکتر جای ایموجی قرار می‌دهیم
-            text = "سلف درحال ابدیته 🥰"
+            # همان ایموجی واقعی که متعلق به Custom Emoji است
+            text = "سلف درحال ابدیته " + REAL_EMOJI
 
-            # Telegram برای entity از UTF-16 offset استفاده می‌کند
+            # offset ایموجی در UTF-16
             emoji_offset = len(
                 "سلف درحال ابدیته ".encode("utf-16-le")
+            ) // 2
+
+            emoji_length = len(
+                REAL_EMOJI.encode("utf-16-le")
             ) // 2
 
             entities = [
                 {
                     "type": "custom_emoji",
                     "offset": emoji_offset,
-                    "length": 2,
+                    "length": emoji_length,
                     "custom_emoji_id": CUSTOM_EMOJI_ID
                 }
             ]
@@ -164,20 +155,32 @@ while True:
             )
 
             if result.get("ok"):
-                print("✅ پیام با Custom Emoji ارسال شد.")
+
+                sent = result["result"]
+
+                print("✅ پیام ارسال شد")
+
+                print(
+                    "Entities:",
+                    sent.get("entities")
+                )
+
             else:
-                print("❌ ارسال پیام ناموفق:")
+
+                print("❌ ارسال ناموفق:")
                 print(result)
 
     except urllib.error.HTTPError as e:
 
         if e.code == 409:
-            print("⚠️ خطای 409 Conflict")
-            print("یک اجرای دیگر از همین ربات هنوز فعال است.")
-            print("اجرای اضافی ربات را خاموش کنید.")
+
+            print("⚠️ 409 Conflict")
+            print("یک اجرای دیگر همین Bot Token فعال است.")
+
             time.sleep(10)
 
         else:
+
             print("❌ HTTP Error:", e)
             time.sleep(5)
 
