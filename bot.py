@@ -1,27 +1,60 @@
-from telegram import Update, MessageEntity
-from telegram.ext import Application, CommandHandler, ContextTypes
+import urllib.request
+import urllib.parse
+import json
+import time
 
 TOKEN = "8200221816:AAHN5J-iFXJoQ9mEFLcRBc3ZVDCv2cmrsxQ"
-CUSTOM_EMOJI_ID = "5931415565955503486"
+EMOJI_ID = "5931415565955503486"
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = "سلف درحال ابدیته 🥰"
+API = f"https://api.telegram.org/bot{TOKEN}/"
 
-    entities = [
-        MessageEntity(
-            type="custom_emoji",
-            offset=len("سلف درحال ابدیته ".encode("utf-16-le")) // 2,
-            length=2,
-            custom_emoji_id=CUSTOM_EMOJI_ID
-        )
-    ]
+def telegram(method, data):
+    data = urllib.parse.urlencode(data).encode()
+    req = urllib.request.Request(API + method, data=data)
+    with urllib.request.urlopen(req, timeout=60) as response:
+        return json.loads(response.read().decode())
 
-    await update.message.reply_text(
-        text=text,
-        entities=entities
-    )
+offset = 0
 
-app = Application.builder().token(TOKEN).build()
-app.add_handler(CommandHandler("start", start))
+while True:
+    try:
+        result = telegram("getUpdates", {
+            "offset": offset,
+            "timeout": 50
+        })
 
-app.run_polling()
+        for update in result.get("result", []):
+            offset = update["update_id"] + 1
+
+            message = update.get("message")
+            if not message:
+                continue
+
+            if message.get("text") == "/start":
+                chat_id = message["chat"]["id"]
+
+                text = "سلف درحال ابدیته 🥰"
+
+                # محل ایموجی پریمیوم در متن
+                emoji_offset = len(
+                    "سلف درحال ابدیته ".encode("utf-16-le")
+                ) // 2
+
+                data = {
+                    "chat_id": chat_id,
+                    "text": text,
+                    "entities": json.dumps([
+                        {
+                            "type": "custom_emoji",
+                            "offset": emoji_offset,
+                            "length": 2,
+                            "custom_emoji_id": EMOJI_ID
+                        }
+                    ])
+                }
+
+                telegram("sendMessage", data)
+
+    except Exception as e:
+        print("Error:", e)
+        time.sleep(3)
