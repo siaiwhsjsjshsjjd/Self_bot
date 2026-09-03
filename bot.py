@@ -90,7 +90,7 @@ class ResilientClient(Client):
 # ----------------- تنظیمات اصلی -----------------
 API_ID = 37386944
 API_HASH = "d64069023db75d11ae5982f653069a98"
-BOT_TOKEN = "8678881387:AAFJ6GDC3ehkRl9WPg5WR6odCQTCR69IJ50"
+BOT_TOKEN = "8200221816:AAHN5J-iFXJoQ9mEFLcRBc3ZVDCv2cmrsxQ"
 
 ROOT_ADMIN = 5552127428
 DATA_FILE = "bot_data_finalxxx.json"
