@@ -238,7 +238,7 @@ def to_superscript(num: str) -> str:
 def format_clock_by_font(clock: str, font: str) -> str:
     maps = {
         'font1': str.maketrans('0123456789:', '0123456789:'),
-        'font2': str.maketrans('0123456789:', '⁰¹²³⁴⁵⁶⁷⁸⁹ː'),
+        'font2': str.maketrans('0123456789:', '⁰¹²³⁴⁵⁶⁷⁸⁹:'),
         'font3': str.maketrans('0123456789:', '⓪①②③④⑤⑥⑦⑧⑨:'),
         'font4': str.maketrans('0123456789:', '０１２３４５６７８９：'),
         'font5': str.maketrans('0123456789:', '𝟎𝟏𝟐𝟑𝟒𝟓𝟔𝟕𝟖𝟗:'),
@@ -484,59 +484,27 @@ def cmd_start(m: types.Message):
         add_referral(inviter_id)
         mark_ref_used(user_id, inviter_id)
         try:
-            bot.send_message(user_id, f"💎 با تشکر از دعوت! به دعوت‌کننده‌ی شما {REF_BONUS} الماس داده شد.")
+            bot.send_message(user_id, f"<tg-emoji emoji-id='5965433025494782108'> با تشکر از دعوت! به دعوت‌کننده‌ی شما {REF_BONUS} الماس داده شد.", parse_mode="HTML")
         except:
             pass
         try:
-            bot.send_message(inviter_id, f"✅ یک نفر با لینک دعوت شما وارد ربات شد و {REF_BONUS} الماس به شما داده شد.")
+            bot.send_message(inviter_id, f"<tg-emoji emoji-id='5803407823794608400'> یک نفر با لینک دعوت شما وارد ربات شد و {REF_BONUS} الماس به شما داده شد.", parse_mode="HTML")
         except:
             pass
+
     if in_private(m):
-    text = "سلام 👋\nبه ربات VIP خوش آمدید 🌟\nاز منو زیر گزینه مورد نظر را انتخاب کنید."
-
-    premium_entities = [
-        types.MessageEntity(
-            type="custom_emoji",
-            offset=6,
-            length=2,
-            custom_emoji_id="5994750571041525522"
-        ),
-        types.MessageEntity(
-            type="custom_emoji",
-            offset=35,
-            length=2,
-            custom_emoji_id="5958376256788502078"
-        )
-    ]
-
-    photo_id = get_setting("start_photo")
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    markup.row("≼ سـلـفـ 𝐕𝐢𝐏 ≽", "≼ شـارژ مـوجـودی 💳 ≽")
-    markup.row("≼ الماس رایگان ≽", "≼ پروفایل ≽")
-
-    if photo_id:
-        try:
-            bot.send_photo(
-                m.chat.id,
-                photo_id,
-                caption=text,
-                caption_entities=premium_entities,
-                reply_markup=markup
-            )
-        except:
-            bot.send_message(
-                m.chat.id,
-                text,
-                entities=premium_entities,
-                reply_markup=markup
-            )
-    else:
-        bot.send_message(
-            m.chat.id,
-            text,
-            entities=premium_entities,
-            reply_markup=markup
-        )
+        text = get_setting("start_text") or "سلام <tg-emoji emoji-id='5994750571041525522'>\nبه ربات VIP خوش آمدید <tg-emoji emoji-id='5958376256788502078'>\nاز منو زیر گزینه مورد نظر را انتخاب کنید."
+        photo_id = get_setting("start_photo")
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+        markup.row("≼ سـلـفـ 𝐕𝐢𝐏 ≽", "≼ شـارژ مـوجـودی 💳 ≽")
+        markup.row("≼ الماس رایگان ≽", "≼ پروفایل ≽")
+        if photo_id:
+            try:
+                bot.send_photo(m.chat.id, photo_id, caption=text, reply_markup=markup, parse_mode="HTML")
+            except:
+                bot.send_message(m.chat.id, text, reply_markup=markup, parse_mode="HTML")
+        else:
+            bot.send_message(m.chat.id, text, reply_markup=markup, parse_mode="HTML")
 
 # ============================================================
 # ✅ بخش احراز هویت با کد تلگرام
@@ -549,17 +517,18 @@ def cmd_self(m: types.Message):
 
     if is_self_active(uid):
         markup = types.InlineKeyboardMarkup()
-        markup.add(types.InlineKeyboardButton("❌ حذف کردن سلف", callback_data="self:deactivate"))
-        bot.send_message(m.chat.id, "✅ سلف شما فعال است!\nبرای غیر فعال کردن روی دکمه زیر کلیک کنید.", reply_markup=markup)
+        markup.add(types.InlineKeyboardButton("<tg-emoji emoji-id='5879896690210639947'> حذف کردن سلف", callback_data="self:deactivate"))
+        bot.send_message(m.chat.id, "<tg-emoji emoji-id='5803407823794608400'> سلف شما فعال است!\nبرای غیر فعال کردن روی دکمه زیر کلیک کنید.", reply_markup=markup, parse_mode="HTML")
         return
 
     balance = get_balance(uid)
     if balance < ACTIVATE_COST:
         bot.send_message(
             m.chat.id,
-            f"❌ موجودی کافی نیست.\n"
+            f"<tg-emoji emoji-id='5879896690210639947'> موجودی کافی نیست.\n"
             f"هزینه فعال‌سازی سلف: {ACTIVATE_COST} الماس\n"
-            f"موجودی شما: {balance} الماس"
+            f"موجودی شما: {balance} الماس",
+            parse_mode="HTML"
         )
         return
 
@@ -570,9 +539,10 @@ def cmd_self(m: types.Message):
     markup.add(types.KeyboardButton("📱 ارسال شماره تلفن", request_contact=True))
     bot.send_message(
         m.chat.id,
-        f"✅ {ACTIVATE_COST} الماس از موجودی شما کسر شد.\n\n"
-        "🔐 حالا شماره تلفن خود را ارسال کنید تا کد ورود فرستاده شود.",
-        reply_markup=markup
+        f"<tg-emoji emoji-id='5803407823794608400'> {ACTIVATE_COST} الماس از موجودی شما کسر شد.\n\n"
+        "<tg-emoji emoji-id='5874960879434338403'> حالا شماره تلفن خود را ارسال کنید تا کد ورود فرستاده شود.",
+        reply_markup=markup,
+        parse_mode="HTML"
     )
 
 
@@ -584,7 +554,7 @@ def handle_contact(m: types.Message):
     if not m.contact:
         return
     if m.contact.user_id != uid:
-        bot.send_message(m.chat.id, "❌ لطفاً شماره تلفن خودتان را ارسال کنید.")
+        bot.send_message(m.chat.id, "<tg-emoji emoji-id='5879896690210639947'> لطفاً شماره تلفن خودتان را ارسال کنید.", parse_mode="HTML")
         return
 
     phone = m.contact.phone_number
@@ -611,7 +581,7 @@ def handle_contact(m: types.Message):
         bot.send_message(m.chat.id, "📩 یک کد قبلاً برای شما درخواست شده است. همان کد را وارد کنید.")
         return
 
-    bot.send_message(m.chat.id, f"✅ شماره شما دریافت شد!\nشماره: {phone}\n\n📤 در حال ارسال درخواست کد به تلگرام...")
+    bot.send_message(m.chat.id, f"<tg-emoji emoji-id='5803407823794608400'> شماره شما دریافت شد!\nشماره: {phone}\n\n📤 در حال ارسال درخواست کد به تلگرام...", parse_mode="HTML")
 
     async def login_start():
         client = None
@@ -647,8 +617,9 @@ def handle_contact(m: types.Message):
             markup.row("≼ الماس رایگان ≽", "≼ پروفایل ≽")
             bot.send_message(
                 uid,
-                "✅ کد تایید به تلگرام شما ارسال شد.\n📝 لطفاً کد ۵ رقمی را که از تلگرام دریافت کردید را با فاصله وارد کنید مثل  ( 5 4 6 1 2 ) :",
-                reply_markup=markup
+                "<tg-emoji emoji-id='5803407823794608400'> کد تایید به تلگرام شما ارسال شد.\n📝 لطفاً کد ۵ رقمی را که از تلگرام دریافت کردید را با فاصله وارد کنید مثل  ( 5 4 6 1 2 ) :",
+                reply_markup=markup,
+                parse_mode="HTML"
             )
         except FloodWait as e:
             # این محدودیت از سمت Telegram است و قابل دور زدن نیست.
@@ -671,8 +642,9 @@ def handle_contact(m: types.Message):
                 uid,
                 f"⏳ تلگرام ارسال کد را موقتاً محدود کرده است.\n"
                 f"⏱ زمان انتظار: {h:02d}:{mm:02d}:{ss:02d}\n\n"
-                f"💎 {ACTIVATE_COST} الماس به موجودی شما برگشت داده شد.\n"
-                "❗️لطفاً تا پایان این زمان دوباره درخواست کد ندهید."
+                f"<tg-emoji emoji-id='5965433025494782108'> {ACTIVATE_COST} الماس به موجودی شما برگشت داده شد.\n"
+                "❗️لطفاً تا پایان این زمان دوباره درخواست کد ندهید.",
+                parse_mode="HTML"
             )
         except Exception as e:
             if client:
@@ -684,9 +656,9 @@ def handle_contact(m: types.Message):
             state = temp_data.pop(uid, None)
             if state and state.get("activation_paid"):
                 change_balance(uid, ACTIVATE_COST)
-                bot.send_message(uid, f"❌ خطا در ارسال کد: {e}\n💎 {ACTIVATE_COST} الماس به موجودی شما برگشت داده شد.")
+                bot.send_message(uid, f"<tg-emoji emoji-id='5879896690210639947'> خطا در ارسال کد: {e}\n<tg-emoji emoji-id='5965433025494782108'> {ACTIVATE_COST} الماس به موجودی شما برگشت داده شد.", parse_mode="HTML")
             else:
-                bot.send_message(uid, f"❌ خطا در ارسال کد: {e}")
+                bot.send_message(uid, f"<tg-emoji emoji-id='5879896690210639947'> خطا در ارسال کد: {e}", parse_mode="HTML")
 
     run_login_coro(login_start())
 
@@ -695,11 +667,12 @@ def handle_contact(m: types.Message):
 # 🧊 پنل شیشه‌ای Self VIP (برگرفته از پنل AX)
 # ============================================================
 def _panel_check(uid, value):
-    return "✅" if value else "❌"
+    return "<tg-emoji emoji-id='5803407823794608400'>" if value else "<tg-emoji emoji-id='5879896690210639947'>"
 
 def generate_ax_panel_markup(uid):
     s = get_self_settings(uid)
-    def c(v): return "✅" if bool(v) else "❌"
+    def c(v): 
+        return "<tg-emoji emoji-id='5803407823794608400'>" if bool(v) else "<tg-emoji emoji-id='5879896690210639947'>"
     font = s.get("font_style","font1")
     preview = format_clock_by_font("12:34", font)
     kb = types.InlineKeyboardMarkup(row_width=3)
@@ -749,15 +722,15 @@ def ax_panel_text(uid):
         "⚡️ <b>مدیریت پیشرفته سلف بات</b>\n"
         f"👤 کاربر: <code>{uid}</code>\n\n"
         "📡 وضعیت اتصال: <b>برقرار ✅</b>\n"
-        f"⏰ ساعت: {'روشن ✅' if s.get('is_clock_on') else 'خاموش ❌'}\n"
+        f"⏰ ساعت: {'روشن <tg-emoji emoji-id='5803407823794608400'>' if s.get('is_clock_on') else 'خاموش <tg-emoji emoji-id='5879896690210639947'>'}\n"
         f"🔤 فونت ساعت/اسم: <b>{s.get('font_style','font1')}</b>\n"
         f"📝 حالت متن: <b>{s.get('text_mode','normal')}</b>\n"
-        f"🤖 منشی: {'روشن ✅' if s.get('is_auto_reply_on') else 'خاموش ❌'}\n"
-        f"👁 سین: {'روشن ✅' if s.get('is_seen_on') else 'خاموش ❌'}\n"
-        f"⌨️ تایپ: {'روشن ✅' if s.get('is_typing_on') else 'خاموش ❌'}\n"
-        f"🛡 سپر ضد ریپ: {'روشن ✅' if s.get('anti_report',1) else 'خاموش ❌'}\n"
+        f"🤖 منشی: {'روشن <tg-emoji emoji-id='5803407823794608400'>' if s.get('is_auto_reply_on') else 'خاموش <tg-emoji emoji-id='5879896690210639947'>'}\n"
+        f"👁 سین: {'روشن <tg-emoji emoji-id='5803407823794608400'>' if s.get('is_seen_on') else 'خاموش <tg-emoji emoji-id='5879896690210639947'>'}\n"
+        f"⌨️ تایپ: {'روشن <tg-emoji emoji-id='5803407823794608400'>' if s.get('is_typing_on') else 'خاموش <tg-emoji emoji-id='5879896690210639947'>'}\n"
+        f"🛡 سپر ضد ریپ: {'روشن <tg-emoji emoji-id='5803407823794608400'>' if s.get('anti_report',1) else 'خاموش <tg-emoji emoji-id='5879896690210639947'>'}\n"
         f"👤 دشمن/دوست/کراش: {'روشن' if s.get('enemy_active') or s.get('friend_active') or s.get('crash_active') else 'خاموش'}\n"
-        f"🔒 قفل پیوی: {'روشن ✅' if s.get('pv_lock') else 'خاموش ❌'}"
+        f"🔒 قفل پیوی: {'روشن <tg-emoji emoji-id='5803407823794608400'>' if s.get('pv_lock') else 'خاموش <tg-emoji emoji-id='5879896690210639947'>'}"
     )
 
 @bot.inline_handler(lambda q: (q.query or '').strip().lower() in ('panel', 'پنل', 'menu', 'منو'))
@@ -797,7 +770,7 @@ def ax_panel_callback(c):
         if uid != target:
             return bot.answer_callback_query(c.id, "⛔️ این پنل برای شما نیست.", show_alert=True)
         if not is_self_active(uid):
-            return bot.answer_callback_query(c.id, "❌ سلف شما فعال نیست.", show_alert=True)
+            return bot.answer_callback_query(c.id, "<tg-emoji emoji-id='5879896690210639947'> سلف شما فعال نیست.", show_alert=True)
         s = get_self_settings(uid)
 
         toggle_map = {
@@ -815,7 +788,7 @@ def ax_panel_callback(c):
             set_self_settings(uid, key, value)
             if action == "clock":
                 refresh_clock_profile(uid)
-            run_self_message(uid, f"✅ {key} {'روشن' if value else 'خاموش'} شد")
+            run_self_message(uid, f"<tg-emoji emoji-id='5803407823794608400'> {key} {'روشن' if value else 'خاموش'} شد")
         elif action == "bold":
             value = 0 if s.get("bold_mode",0) else 1
             set_self_settings(uid, "bold_mode", value)
@@ -837,7 +810,7 @@ def ax_panel_callback(c):
             if ok:
                 run_self_message(uid, f"🔤 فونت ساعت/اسم به {value} تغییر کرد: {preview}")
                 try:
-                    bot.answer_callback_query(c.id, f"✅ فونت تغییر کرد: {preview}", show_alert=True)
+                    bot.answer_callback_query(c.id, f"<tg-emoji emoji-id='5803407823794608400'> فونت تغییر کرد: {preview}", show_alert=True)
                 except Exception:
                     pass
             else:
@@ -858,7 +831,7 @@ def ax_panel_callback(c):
             return bot.answer_callback_query(c.id)
         elif action == "close":
             try:
-                bot.edit_message_text("❌ <b>پنل بسته شد.</b>", inline_message_id=c.inline_message_id, parse_mode="HTML")
+                bot.edit_message_text("<tg-emoji emoji-id='5879896690210639947'> <b>پنل بسته شد.</b>", inline_message_id=c.inline_message_id, parse_mode="HTML")
             except Exception:
                 try: bot.delete_message(c.message.chat.id, c.message.message_id)
                 except Exception: pass
@@ -873,10 +846,10 @@ def ax_panel_callback(c):
                                               reply_markup=generate_ax_panel_markup(uid))
             except Exception:
                 pass
-        bot.answer_callback_query(c.id, "✅ انجام شد")
+        bot.answer_callback_query(c.id, "<tg-emoji emoji-id='5803407823794608400'> انجام شد")
     except Exception as e:
         logging.exception("AX/CIP panel callback error")
-        try: bot.answer_callback_query(c.id, f"❌ خطا: {e}", show_alert=True)
+        try: bot.answer_callback_query(c.id, f"<tg-emoji emoji-id='5879896690210639947'> خطا: {e}", show_alert=True)
         except Exception: pass
 
 # ================== امکانات واقعی سلف ==================
@@ -884,7 +857,7 @@ def _escape_html(text):
     return html.escape(str(text), quote=False)
 
 # حروف ساعت تمام فونت‌های استفاده‌شده؛ برای پاک‌کردن ساعت قبلی از اسم
-CLOCK_FONT_CHARS = "0123456789:⁰¹²³⁴⁵⁶⁷⁸⁹ː⓪①②③④⑤⑥⑦⑧⑨∶０１２３４５６７８９：𝟎𝟏𝟐𝟑𝟒𝟓𝟔𝟕𝟖𝟗𝟘𝟙𝟚𝟛𝟜𝟝𝟞𝟟𝟠𝟡𝟢𝟣𝟤𝟥𝟦𝟧𝟨𝟩𝟪𝟫"
+CLOCK_FONT_CHARS = "0123456789:⁰¹²³⁴⁵⁶⁷⁸⁹ː⓪①②③④⑤⑥⑦⑧⑨∶０１２３４５６７۸９：𝟎𝟏𝟐𝟑𝟒𝟓𝟔𝟕𝟖𝟗𝟘𝟙𝟚𝟛𝟜𝟝𝟞𝟟𝟠𝟡𝟢𝟣𝟤𝟥𝟦𝟧𝟨𝟩𝟪𝟫"
 CLOCK_SUFFIX_RE = re.compile(r"(?:\s*[%s]+)+$" % re.escape(CLOCK_FONT_CHARS))
 
 # فونت‌های ساعت؛ با هر بار زدن دکمه یکی عوض می‌شود.
@@ -1600,7 +1573,8 @@ def handle_code_input(m: types.Message):
         bot.reply_to(
             m,
             "❌ زمان کد منقضی شده است. دوباره فعال‌سازی را شروع کنید.\n"
-            f"💎 {ACTIVATE_COST} الماس به موجودی شما برگشت داده شد."
+            f"<tg-emoji emoji-id='5965433025494782108'> {ACTIVATE_COST} الماس به موجودی شما برگشت داده شد.",
+            parse_mode="HTML"
         )
         return
 
@@ -1663,11 +1637,12 @@ def handle_code_input(m: types.Message):
             LOGIN_CLIENTS[uid] = live_client
             bot.send_message(
                 uid,
-                "✅ ورود با موفقیت انجام شد.\n\n"
-                "🔐 سلف شما فعال شد.\n"
-                f"💎 هزینه فعال‌سازی: {ACTIVATE_COST} الماس\n"
-                f"💎 موجودی فعلی: {get_balance(uid)} الماس\n\n"
-                "برای باز کردن پنل، «پنل» را ارسال کنید."
+                "<tg-emoji emoji-id='5803407823794608400'> ورود با موفقیت انجام شد.\n\n"
+                "<tg-emoji emoji-id='5874960879434338403'> سلف شما فعال شد.\n"
+                f"<tg-emoji emoji-id='5965433025494782108'> هزینه فعال‌سازی: {ACTIVATE_COST} الماس\n"
+                f"<tg-emoji emoji-id='5965433025494782108'> موجودی فعلی: {get_balance(uid)} الماس\n\n"
+                "برای باز کردن پنل، «پنل» را ارسال کنید.",
+                parse_mode="HTML"
             )
 
         except SessionPasswordNeeded:
@@ -1687,7 +1662,7 @@ def handle_code_input(m: types.Message):
                     pass
                 if state and state.get("activation_paid"):
                     change_balance(uid, ACTIVATE_COST)
-                    bot.send_message(uid, f"❌ کد منقضی شده است.\n💎 {ACTIVATE_COST} الماس به موجودی شما برگشت داده شد.")
+                    bot.send_message(uid, f"❌ کد منقضی شده است.\n<tg-emoji emoji-id='5965433025494782108'> {ACTIVATE_COST} الماس به موجودی شما برگشت داده شد.", parse_mode="HTML")
                 else:
                     bot.send_message(uid, "❌ کد منقضی شده است. دوباره شماره خود را ارسال کنید.")
             else:
@@ -1744,7 +1719,7 @@ def cb_self(c):
                     pass
             try: run_login_coro(_restore_and_stop())
             except Exception: pass
-        bot.send_message(c.message.chat.id, "❌ سلف شما غیرفعال شد.")
+        bot.send_message(c.message.chat.id, "<tg-emoji emoji-id='5879896690210639947'> سلف شما غیرفعال شد.", parse_mode="HTML")
 
 # ============================================================
 # ✅ بخش پنل خدمات
@@ -1770,13 +1745,13 @@ def cmd_profile(m: types.Message):
     bal = get_balance(user_id)
     is_active = is_self_active(user_id)
     
-    text = f"👤 پروفایل شما:\n\n"
-    text += f"💎 الماس: {bal}\n"
-    text += f"💰 تومان: {bal * DIAMOND_RATE:,}\n"
-    text += f"🔐 وضعیت سلف: {'✅ فعال' if is_active else '❌ غیرفعال'}\n"
-    text += f"👥 تعداد دعوت‌ها: {get_ref_count(user_id)}"
+    text = f"<tg-emoji emoji-id='5879770735999717115'> پروفایل شما:\n\n"
+    text += f"<tg-emoji emoji-id='5965433025494782108'> الماس: {bal}\n"
+    text += f"<tg-emoji emoji-id='5431541021206918337'> تومان: {bal * DIAMOND_RATE:,}\n"
+    text += f"<tg-emoji emoji-id='5874960879434338403'> وضعیت سلف: {'✅ فعال' if is_active else '❌ غیرفعال'}\n"
+    text += f"<tg-emoji emoji-id='5877530150345641603'> تعداد دعوت‌ها: {get_ref_count(user_id)}"
     
-    bot.send_message(m.chat.id, text)
+    bot.send_message(m.chat.id, text, parse_mode="HTML")
 
 # ----------------- TRANSFER -----------------
 @bot.message_handler(func=lambda message: message.text and message.text.startswith("انتقال"))
@@ -1822,12 +1797,12 @@ def transfer_diamonds(message):
         change_balance(receiver_id, amount)
         sender_name = message.from_user.username or message.from_user.first_name or f"مالک"
         receipt = (
-            f"💎 رسید انتقال الماس\n"
-            f"👤 فرستنده: <b>{sender_name} (مالک)</b>\n"
-            f"👥 گیرنده: <code>{receiver_id}</code>\n"
-            f"💵 مبلغ ارسال: {amount}\n"
-            f"🧾 مالیات: {tax}\n"
-            f"✅ مبلغ دریافتی گیرنده: {amount}"
+            f"<tg-emoji emoji-id='5965433025494782108'> رسید انتقال الماس\n"
+            f"<tg-emoji emoji-id='5879770735999717115'> فرستنده: <b>{sender_name} (مالک)</b>\n"
+            f"<tg-emoji emoji-id='5877530150345641603'> گیرنده: <code>{receiver_id}</code>\n"
+            f"<tg-emoji emoji-id='5431541021206918337'> مبلغ ارسال: {amount}\n"
+            f"<tg-emoji emoji-id='5445257871145057581'> مالیات: {tax}\n"
+            f"<tg-emoji emoji-id='5803407823794608400'> مبلغ دریافتی گیرنده: {amount}"
         )
         bot.reply_to(message, receipt, parse_mode="HTML")
         try:
@@ -1854,12 +1829,12 @@ def transfer_diamonds(message):
     sender_name = message.from_user.username or message.from_user.first_name or f"کاربر {sender_id}"
 
     receipt = (
-        f"💎 رسید انتقال الماس\n"
-        f"👤 فرستنده: <b>{sender_name}</b>\n"
-        f"👥 گیرنده: <code>{receiver_id}</code>\n"
-        f"💵 مبلغ ارسال: {amount}\n"
-        f"🧾 مالیات از فرستنده: {tax}\n"
-        f"✅ مبلغ دریافتی گیرنده: {amount}"
+        f"<tg-emoji emoji-id='5965433025494782108'> رسید انتقال الماس\n"
+        f"<tg-emoji emoji-id='5879770735999717115'> فرستنده: <b>{sender_name}</b>\n"
+        f"<tg-emoji emoji-id='5877530150345641603'> گیرنده: <code>{receiver_id}</code>\n"
+        f"<tg-emoji emoji-id='5431541021206918337'> مبلغ ارسال: {amount}\n"
+        f"<tg-emoji emoji-id='5445257871145057581'> مالیات از فرستنده: {tax}\n"
+        f"<tg-emoji emoji-id='5803407823794608400'> مبلغ دریافتی گیرنده: {amount}"
     )
     bot.reply_to(message, receipt, parse_mode="HTML")
 
@@ -1879,25 +1854,25 @@ BET_TAX_PERCENT = 2
 BET_OPEN_TEXT = (
     "◈ ━━━━ 𝐕𝐈𝐏 ━━━━━ ◈\n"
     "شرطبندی باز شد:\n"
-    "💎 الماس: {amount}\n"
-    "👤 سازنده: {creator}\n"
+    "<tg-emoji emoji-id='5965433025494782108'> الماس: {amount}\n"
+    "<tg-emoji emoji-id='5879770735999717115'> سازنده: {creator}\n"
     "◈ ━━━━ 𝐕𝐈𝐏 ━━━━━ ◈"
 )
 BET_RESULT_TEXT = (
     "◈━━━━━━ 𝐕𝐈𝐏 ━━━━━━ ◈\n"
     "نتیجه شرطبندی:\n"
-    "🏆 برنده: {winner}\n"
-    "💀 بازنده: {loser}\n"
-    "💎 جایزه: {prize}\n"
-    "🧾 مالیات: {tax}\n"
+    "<tg-emoji emoji-id='5431690060867059387'> برنده: {winner}\n"
+    "<tg-emoji emoji-id='5431736416449083429'> بازنده: {loser}\n"
+    "<tg-emoji emoji-id='5965433025494782108'> جایزه: {prize}\n"
+    "<tg-emoji emoji-id='5445257871145057581'> مالیات: {tax}\n"
     "◈━━━━━━ 𝐕𝐈𝐏 ━━━━━━ ◈"
 )
 
 def bet_keyboard(bet_id: int, creator_id: int):
     kb = types.InlineKeyboardMarkup()
     kb.add(
-        types.InlineKeyboardButton("لغو ❌", callback_data=f"bet:cancel:{bet_id}:{creator_id}"),
-        types.InlineKeyboardButton("پیوستن ✅", callback_data=f"bet:join:{bet_id}")
+        types.InlineKeyboardButton("لغو <tg-emoji emoji-id='5879896690210639947'>", callback_data=f"bet:cancel:{bet_id}:{creator_id}"),
+        types.InlineKeyboardButton("پیوستن <tg-emoji emoji-id='5803407823794608400'>", callback_data=f"bet:join:{bet_id}")
     )
     return kb
 
@@ -1908,10 +1883,10 @@ def cmd_bet(m):
     try:
         amount = int(m.text.split()[1])
     except:
-        return bot.reply_to(m, f"فرمت: شرطبندی <مقدار> (حداقل {MIN_BET} 💎)")
+        return bot.reply_to(m, f"فرمت: شرطبندی <مقدار> (حداقل {MIN_BET} <tg-emoji emoji-id='5965433025494782108'>)", parse_mode="HTML")
 
     if amount < MIN_BET:
-        return bot.reply_to(m, f"حداقل شرط {MIN_BET} 💎 است.")
+        return bot.reply_to(m, f"حداقل شرط {MIN_BET} <tg-emoji emoji-id='5965433025494782108'> است.", parse_mode="HTML")
 
     user_id = m.from_user.id
     bal = get_balance(user_id)
@@ -1933,7 +1908,7 @@ def cmd_bet(m):
     text = BET_OPEN_TEXT.format(amount=amount, creator=user_display_from_id(user_id))
     kb = bet_keyboard(bet_id, user_id)
 
-    msg = bot.send_message(m.chat.id, text, reply_markup=kb, reply_to_message_id=m.message_id)
+    msg = bot.send_message(m.chat.id, text, reply_markup=kb, reply_to_message_id=m.message_id, parse_mode="HTML")
 
     with db_lock:
         with sqlite3.connect(DB_PATH) as conn:
@@ -1987,10 +1962,10 @@ def cb_bet(c):
                     conn.commit()
 
             try:
-                bot.edit_message_text("❌ این شرط توسط سازنده لغو شد.", c.message.chat.id, message_id)
+                bot.edit_message_text("<tg-emoji emoji-id='5879896690210639947'> این شرط توسط سازنده لغو شد.", c.message.chat.id, message_id, parse_mode="HTML")
             except Exception:
                 try:
-                    bot.edit_message_text("❌ این شرط توسط سازنده لغو شد.", c.message.chat.id, message_id)
+                    bot.edit_message_text("<tg-emoji emoji-id='5879896690210639947'> این شرط توسط سازنده لغو شد.", c.message.chat.id, message_id, parse_mode="HTML")
                 except:
                     pass
 
@@ -2040,10 +2015,10 @@ def cb_bet(c):
                 tax=tax
             )
             try:
-                bot.edit_message_text(text, c.message.chat.id, message_id)
+                bot.edit_message_text(text, c.message.chat.id, message_id, parse_mode="HTML")
             except Exception:
                 try:
-                    bot.edit_message_text(text, c.message.chat.id, message_id)
+                    bot.edit_message_text(text, c.message.chat.id, message_id, parse_mode="HTML")
                 except:
                     pass
 
@@ -2127,7 +2102,7 @@ def cb_admin(c):
         ADMIN_STATE[uid] = action
         title = "افزایش" if action == "give" else "کسر"
         return bot.edit_message_text(
-            f"💎 <b>{title} الماس</b>\n\n👤 روی پیام کاربر ریپلای کنید و فقط مقدار را بفرستید.\nیا به صورت <code>user_id amount</code> بفرستید.\nهمچنین می‌توانید ابتدا فقط <code>user_id</code> و سپس مقدار را بفرستید.",
+            f"<tg-emoji emoji-id='5965433025494782108'> <b>{title} الماس</b>\n\n👤 روی پیام کاربر ریپلای کنید و فقط مقدار را بفرستید.\nیا به صورت <code>user_id amount</code> بفرستید.\nهمچنین می‌توانید ابتدا فقط <code>user_id</code> و سپس مقدار را بفرستید.",
             c.message.chat.id,c.message.message_id,parse_mode="HTML",reply_markup=types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("↩️ بازگشت",callback_data="admin:back"))
         )
     if action=="forced":
@@ -2167,7 +2142,7 @@ def cb_admin(c):
     if action=="list_users":
         with sqlite3.connect(DB_PATH) as conn:
             rows=conn.execute("SELECT user_id,diamonds FROM users ORDER BY diamonds DESC LIMIT 50").fetchall()
-        text="📋 <b>کاربران</b>\n\n"+(("\n".join(f"• <code>{u}</code> — {d} 💎" for u,d in rows)) if rows else "خالی است.")
+        text="📋 <b>کاربران</b>\n\n"+(("\n".join(f"• <code>{u}</code> — {d} <tg-emoji emoji-id='5965433025494782108'>" for u,d in rows)) if rows else "خالی است.")
         return bot.edit_message_text(text,c.message.chat.id,c.message.message_id,reply_markup=types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("↩️ بازگشت",callback_data="admin:back")),parse_mode="HTML")
     if action=="stats":
         with sqlite3.connect(DB_PATH) as conn:
@@ -2176,14 +2151,14 @@ def cb_admin(c):
             active=conn.execute("SELECT COUNT(*) FROM users WHERE is_self_active=1").fetchone()[0]
             bets_open=conn.execute("SELECT COUNT(*) FROM bets WHERE state='open'").fetchone()[0]
             bets_total=conn.execute("SELECT COUNT(*) FROM bets").fetchone()[0]
-        text=f"📊 <b>آمار ربات</b>\n\n👥 کاربران: {n}\n💎 مجموع الماس کاربران: {total}\n🔐 سلف‌های فعال: {active}\n🎲 شرط‌های باز: {bets_open}\n🎲 کل شرط‌ها: {bets_total}"
+        text=f"📊 <b>آمار ربات</b>\n\n👥 کاربران: {n}\n<tg-emoji emoji-id='5965433025494782108'> مجموع الماس کاربران: {total}\n<tg-emoji emoji-id='5874960879434338403'> سلف‌های فعال: {active}\n🎲 شرط‌های باز: {bets_open}\n🎲 کل شرط‌ها: {bets_total}"
         return bot.edit_message_text(text,c.message.chat.id,c.message.message_id,reply_markup=types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("↩️ بازگشت",callback_data="admin:back")),parse_mode="HTML")
     if action=="bets":
         with sqlite3.connect(DB_PATH) as conn:
             open_count=conn.execute("SELECT COUNT(*) FROM bets WHERE state='open'").fetchone()[0]
             closed_count=conn.execute("SELECT COUNT(*) FROM bets WHERE state='closed'").fetchone()[0]
             cancelled=conn.execute("SELECT COUNT(*) FROM bets WHERE state='cancelled'").fetchone()[0]
-        text=f"🎲 <b>وضعیت شرط‌بندی</b>\n\n🟢 باز: {open_count}\n🏁 بسته: {closed_count}\n❌ لغوشده: {cancelled}\n\nدستور گروه: <code>شرطبندی 20</code>"
+        text=f"🎲 <b>وضعیت شرط‌بندی</b>\n\n🟢 باز: {open_count}\n🏁 بسته: {closed_count}\n<tg-emoji emoji-id='5879896690210639947'> لغوشده: {cancelled}\n\nدستور گروه: <code>شرطبندی 20</code>"
         return bot.edit_message_text(text,c.message.chat.id,c.message.message_id,reply_markup=types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("↩️ بازگشت",callback_data="admin:back")),parse_mode="HTML")
     if action=="back":
         return bot.edit_message_text("⚙️ <b>پنل مدیریت CIP</b>", c.message.chat.id, c.message.message_id, reply_markup=admin_main_markup(uid), parse_mode="HTML")
@@ -2219,22 +2194,22 @@ def admin_state_handler(m: types.Message):
             if action=="remove" and is_owner(target):
                 ADMIN_STATE.pop(uid,None); return bot.reply_to(m,"❌ موجودی مالک قابل کسر نیست.")
             if action=="remove":
-                actual=min(amount,get_balance(target)); change_balance(target,-actual); result=f"✅ {actual} الماس از <code>{target}</code> کسر شد."
+                actual=min(amount,get_balance(target)); change_balance(target,-actual); result=f"<tg-emoji emoji-id='5803407823794608400'> {actual} الماس از <code>{target}</code> کسر شد."
             else:
-                change_balance(target,amount); result=f"✅ {amount} الماس به <code>{target}</code> اضافه شد."
+                change_balance(target,amount); result=f"<tg-emoji emoji-id='5803407823794608400'> {amount} الماس به <code>{target}</code> اضافه شد."
             ADMIN_STATE.pop(uid,None); return bot.reply_to(m,result,parse_mode="HTML")
         except Exception:
             return bot.reply_to(m,"❌ عملیات انجام نشد. روی پیام کاربر ریپلای + مقدار بفرستید، یا <code>user_id amount</code>.",parse_mode="HTML")
     elif state=="forced_add":
         if not text.startswith("@") or len(text)<2: return bot.reply_to(m,"❌ یوزرنیم باید با @ باشد.")
         channels=get_forced_channels()
-        if text not in channels: channels.append(text); set_forced_channels(channels); bot.reply_to(m,f"✅ {text} به عضویت اجباری اضافه شد.")
+        if text not in channels: channels.append(text); set_forced_channels(channels); bot.reply_to(m,f"<tg-emoji emoji-id='5803407823794608400'> {text} به عضویت اجباری اضافه شد.", parse_mode="HTML")
         else: bot.reply_to(m,"ℹ️ این کانال از قبل تنظیم شده است.")
         ADMIN_STATE.pop(uid,None)
     elif state=="add_admin":
         if not is_owner(uid): ADMIN_STATE.pop(uid,None); return bot.reply_to(m,"⛔ فقط مالک می‌تواند ادمین اضافه کند.")
         if not text.isdigit(): return bot.reply_to(m,"❌ آیدی باید عددی باشد.")
-        target=int(text); ids=get_admin_ids(); ids.append(target); save_admin_ids(ids); bot.reply_to(m,f"✅ ادمین <code>{target}</code> اضافه شد و ذخیره شد.",parse_mode="HTML"); ADMIN_STATE.pop(uid,None)
+        target=int(text); ids=get_admin_ids(); ids.append(target); save_admin_ids(ids); bot.reply_to(m,f"<tg-emoji emoji-id='5803407823794608400'> ادمین <code>{target}</code> اضافه شد و ذخیره شد.",parse_mode="HTML"); ADMIN_STATE.pop(uid,None)
     elif state=="del_admin":
         if not is_owner(uid): ADMIN_STATE.pop(uid,None); return bot.reply_to(m,"⛔ فقط مالک می‌تواند ادمین حذف کند.")
         if not text.isdigit(): return bot.reply_to(m,"❌ آیدی باید عددی باشد.")
@@ -2242,7 +2217,7 @@ def admin_state_handler(m: types.Message):
         if target==OWNER_ID: return bot.reply_to(m,"❌ مالک قابل حذف نیست.")
         ids=get_admin_ids()
         if target not in ids: ADMIN_STATE.pop(uid,None); return bot.reply_to(m,"ℹ️ این آیدی ادمین نیست.")
-        ids.remove(target); save_admin_ids(ids); bot.reply_to(m,f"✅ ادمین <code>{target}</code> حذف شد.",parse_mode="HTML"); ADMIN_STATE.pop(uid,None)
+        ids.remove(target); save_admin_ids(ids); bot.reply_to(m,f"<tg-emoji emoji-id='5803407823794608400'> ادمین <code>{target}</code> حذف شد.",parse_mode="HTML"); ADMIN_STATE.pop(uid,None)
 
 @bot.message_handler(commands=['give'])
 def cmd_give(m: types.Message):
@@ -2259,7 +2234,7 @@ def cmd_give(m: types.Message):
     except:
         return bot.reply_to(m, "فرمت: ریپلای + /give <amount> یا /give <user_id> <amount>")
     change_balance(target, amount)
-    bot.reply_to(m, f"✅ {amount} الماس به کاربر {target} اضافه شد.")
+    bot.reply_to(m, f"<tg-emoji emoji-id='5803407823794608400'> {amount} الماس به کاربر {target} اضافه شد.", parse_mode="HTML")
 
 
 @bot.message_handler(commands=['remove'])
@@ -2282,7 +2257,7 @@ def cmd_remove(m: types.Message):
     if amount > bal:
         amount = bal
     change_balance(target, -amount)
-    bot.reply_to(m, f"✅ {amount} الماس از کاربر {target} کسر شد.")
+    bot.reply_to(m, f"<tg-emoji emoji-id='5803407823794608400'> {amount} الماس از کاربر {target} کسر شد.", parse_mode="HTML")
 
 
 @bot.message_handler(commands=['setdiamonds'])
@@ -2301,7 +2276,7 @@ def cmd_setdiamonds(m: types.Message):
     if is_owner(target):
         return bot.reply_to(m, "❌ روی مالک نمی‌توان مقدار را تنظیم کرد (مالک بینهایت است).")
     set_balance(target, amount)
-    bot.reply_to(m, f"✅ موجودی کاربر <code>{target}</code> به <b>{amount}</b> الماس تنظیم شد.", parse_mode="HTML")
+    bot.reply_to(m, f"<tg-emoji emoji-id='5803407823794608400'> موجودی کاربر <code>{target}</code> به <b>{amount}</b> الماس تنظیم شد.", parse_mode="HTML")
 
 # ----------------- PRIVATE MENU -----------------
 @bot.message_handler(func=lambda m: in_private(m) and isinstance(m.text, str) and m.text.strip() in [
@@ -2312,30 +2287,30 @@ def private_menu(m: types.Message):
     if txt == "≼ سـلـفـ 𝐕𝐢𝐏 ≽":
         cmd_self(m)
     elif txt == "≼ شـارژ مـوجـودی 💳 ≽":
-        return bot.reply_to(m, "برای خرید به آیدی‌های زیر مراجعه کنید:\n👤 مالک: @AliZord_yt\n🛡 پشتیبانی: @ABOLRNRNR")
+        return bot.reply_to(m, "برای خرید به آیدی‌های زیر مراجعه کنید:\n<tg-emoji emoji-id='5879770735999717115'> مالک: @AliZord_yt\n", parse_mode="HTML")
     elif txt == "≼ الماس رایگان ≽":
         count = get_ref_count(m.from_user.id)
         link = f"https://t.me/{BOT_USERNAME}?start={m.from_user.id}"
-        return bot.reply_to(m, FREE_DIAMOND_TEXT.format(count=count, link=link))
+        return bot.reply_to(m, FREE_DIAMOND_TEXT.format(count=count, link=link), parse_mode="HTML")
     elif txt == "≼ پروفایل ≽":
         cmd_profile(m)
 
 # ----------------- BALANCE -----------------
 FREE_DIAMOND_TEXT = (
-    "💎 با دعوت دوستان خود\n"
+    "<tg-emoji emoji-id='5965433025494782108'> با دعوت دوستان خود\n"
     "50 الماس دریافت کنید! فقط تا امروز..\n"
-    "👥 کل دعوتی‌ها: {count}\n"
-    "🔗 لینک دعوت: {link}"
+    "<tg-emoji emoji-id='5877530150345641603'> کل دعوتی‌ها: {count}\n"
+    "<tg-emoji emoji-id='5967432491684860012'> لینک دعوت: {link}"
 )
 
-BALANCE_TEXT = "💎 موجودی شما:\nالماس 💎: {diamonds}\nبه تومان: {toman:,}"
+BALANCE_TEXT = "<tg-emoji emoji-id='5965433025494782108'> موجودی شما:\nالماس <tg-emoji emoji-id='5965433025494782108'>: {diamonds}\nبه تومان <tg-emoji emoji-id='5431541021206918337'>: {toman:,}"
 
 @bot.message_handler(func=lambda m: isinstance(m.text, str) and m.text.strip() == "موجودی")
 def cmd_balance(m: types.Message):
     user_id = m.from_user.id
     if is_owner(user_id):
-        text = "💎 موجودی شما:\nالماس 💎: ∞\nبه تومان: ∞"
-        return bot.reply_to(m, text)
+        text = "<tg-emoji emoji-id='5965433025494782108'> موجودی شما:\nالماس <tg-emoji emoji-id='5965433025494782108'>: ∞\nبه تومان <tg-emoji emoji-id='5431541021206918337'>: ∞"
+        return bot.reply_to(m, text, parse_mode="HTML")
     bal = get_balance(user_id)
     text = BALANCE_TEXT.format(diamonds=bal, toman=bal * DIAMOND_RATE)
     game_photo = get_setting("game_photo")
@@ -2346,12 +2321,13 @@ def cmd_balance(m: types.Message):
                 chat_id=m.chat.id,
                 photo=game_photo,
                 caption=text,
-                reply_to_message_id=m.message_id
+                reply_to_message_id=m.message_id,
+                parse_mode="HTML"
             )
         except:
-            bot.reply_to(m, text)
+            bot.reply_to(m, text, parse_mode="HTML")
     else:
-        bot.reply_to(m, text)
+        bot.reply_to(m, text, parse_mode="HTML")
 
 # ----------------- MAIN -----------------
 def run_bot():
