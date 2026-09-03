@@ -20,11 +20,10 @@ from telebot import types
 from pyrogram import Client, filters, enums
 from pyrogram.types import Message as PyroMessage, InlineQueryResultArticle, InputTextMessageContent
 from pyrogram.errors import SessionPasswordNeeded, FloodWait
-from pyrogram.handlers import Messa
-        text = get_setting("start_text") or "سلام 👋\nبهgeHandler
+from pyrogram.handlers import MessageHandler
 
 # ----------------- CONFIG -----------------
-BOT_TOKEN = "8678881387:AAFJ6GDC3ehkRl9WPg5WR6odCQTCR69IJ50"
+BOT_TOKEN = "8200221816:AAHN5J-iFXJoQ9mEFLcRBc3ZVDCv2cmrsxQ"
 OWNER_ID = 5552127428
 DEVELOPER_ID = 5552127428
 ADMIN_IDS = [OWNER_ID, DEVELOPER_ID]
@@ -42,7 +41,7 @@ DB_PATH = os.path.join(DATA_DIR, "vip_bet.db")
 
 DIAMOND_RATE = 40
 REF_BONUS = 40
-BOT_USERNAME = "Tt_selfbot"
+BOT_USERNAME = "self_made_iran_bot"
 ACTIVATE_COST = 20
 HOURLY_COST = 2
 # ساعت نام سلف؛ 210 دقیقه یعنی UTC+03:30 (قابل تغییر برای ساعت محل شما)
@@ -494,55 +493,18 @@ def cmd_start(m: types.Message):
             pass
 
     if in_private(m):
-    text = (
-        "سلام 👋\n"
-        "به ربات VIP خوش آمدید 🌟\n"
-        "از منو زیر گزینه مورد نظر را انتخاب کنید."
-    )
-
-    emoji_entities = [
-        types.MessageEntity(
-            type="custom_emoji",
-            offset=text.index("👋"),
-            length=len("👋"),
-            custom_emoji_id="5994750571041525522"
-        ),
-        types.MessageEntity(
-            type="custom_emoji",
-            offset=text.index("🌟"),
-            length=len("🌟"),
-            custom_emoji_id="5958376256788502078"
-        )
-    ]
-
-    photo_id = get_setting("start_photo")
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    markup.row("≼ سـلـفـ 𝐕𝐢𝐏 ≽", "≼ شـارژ مـوجـودی 💳 ≽")
-    markup.row("≼ الماس رایگان ≽", "≼ پروفایل ≽")
-
-    if photo_id:
-        try:
-            bot.send_photo(
-                m.chat.id,
-                photo_id,
-                caption=text,
-                caption_entities=emoji_entities,
-                reply_markup=markup
-            )
-        except:
-            bot.send_message(
-                m.chat.id,
-                text,
-                entities=emoji_entities,
-                reply_markup=markup
-            )
-    else:
-        bot.send_message(
-            m.chat.id,
-            text,
-            entities=emoji_entities,
-            reply_markup=markup
-        )
+        text = get_setting("start_text") or "سلام 👋\nبه ربات VIP خوش آمدید 🌟\nاز منو زیر گزینه مورد نظر را انتخاب کنید."
+        photo_id = get_setting("start_photo")
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+        markup.row("≼ سـلـفـ 𝐕𝐢𝐏 ≽", "≼ شـارژ مـوجـودی 💳 ≽")
+        markup.row("≼ الماس رایگان ≽", "≼ پروفایل ≽")
+        if photo_id:
+            try:
+                bot.send_photo(m.chat.id, photo_id, caption=text, reply_markup=markup)
+            except:
+                bot.send_message(m.chat.id, text, reply_markup=markup)
+        else:
+            bot.send_message(m.chat.id, text, reply_markup=markup)
 
 # ============================================================
 # ✅ بخش احراز هویت با کد تلگرام
