@@ -491,25 +491,20 @@ def cmd_start(m: types.Message):
             bot.send_message(inviter_id, f"✅ یک نفر با لینک دعوت شما وارد ربات شد و {REF_BONUS} الماس به شما داده شد.")
         except:
             pass
-
     if in_private(m):
-    text = (
-        "سلام 👋\n"
-        "به ربات VIP خوش آمدید 🌟\n"
-        "از منو زیر گزینه مورد نظر را انتخاب کنید."
-    )
+    text = "سلام 👋\nبه ربات VIP خوش آمدید 🌟\nاز منو زیر گزینه مورد نظر را انتخاب کنید."
 
-    emoji_entities = [
+    premium_entities = [
         types.MessageEntity(
             type="custom_emoji",
-            offset=text.index("👋"),
-            length=len("👋"),
+            offset=6,
+            length=2,
             custom_emoji_id="5994750571041525522"
         ),
         types.MessageEntity(
             type="custom_emoji",
-            offset=text.index("🌟"),
-            length=len("🌟"),
+            offset=35,
+            length=2,
             custom_emoji_id="5958376256788502078"
         )
     ]
@@ -525,21 +520,21 @@ def cmd_start(m: types.Message):
                 m.chat.id,
                 photo_id,
                 caption=text,
-                caption_entities=emoji_entities,
+                caption_entities=premium_entities,
                 reply_markup=markup
             )
         except:
             bot.send_message(
                 m.chat.id,
                 text,
-                entities=emoji_entities,
+                entities=premium_entities,
                 reply_markup=markup
             )
     else:
         bot.send_message(
             m.chat.id,
             text,
-            entities=emoji_entities,
+            entities=premium_entities,
             reply_markup=markup
         )
 
